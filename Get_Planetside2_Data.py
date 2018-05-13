@@ -19,13 +19,34 @@ import logging
 import sqlite3
 import json
 import os
+import sys
 import urllib.request
 import time
 import datetime
 import networkx as nx
 
 
-logger = logging.getLogger('Crawler logger')
+
+root = logging.getLogger(__name__)
+root.setLevel(logging.INFO)
+
+console_handle = logging.StreamHandler(sys.stdout)
+console_handle.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handle.setFormatter(formatter)
+root.addHandler(console_handle)
+
+current_date = datetime.datetime.now().strftime("%B%d")
+log_path = os.path.join(
+    'C:\\Users\\jscle\\Desktop\\PS2-social-crawler',
+    '%s_logs.log' % current_date)
+with open(log_path, 'w') as f:
+    f.write('')
+file_handle = logging.FileHandler(log_path, 'w')
+
+file_handle.setLevel(logging.INFO)
+file_handle.setFormatter(formatter)
+root.addHandler(file_handle)
 
 
 def singleCol(conn, query):
@@ -85,8 +106,8 @@ def fetch_url(url):
             decoded = json.loads(jsonObj.read().decode('utf8'))
             return decoded
         except Exception as err:
-            print(str(err))
-            print('sleeping for 35 seconds before retrying again')
+            root.info(str(err))
+            root.info('sleeping for 35 seconds before retrying again')
             time.sleep(35)
         retries += 1
 
@@ -170,14 +191,11 @@ class main_data_crawler():
         # I have two computers and thus two paths to the Dropbox.
         # You will want to replace self.mypath with whatever path
         # you want to use for storing your data.
-        if os.path.exists('E:\\Dropbox\\PS2Research\\'):
-            self.mypath = 'E:\\Dropbox\\PS2Research\\NewData\\'
-        else:
-            self.mypath = 'C:\\Users\\John\\Dropbox\\PS2Research\\NewData\\'
+        self.mypath = os.path.join('D:', 'Dropbox', 'Dropbox', 'Data2018')
 
         # The archive database saves the responses from the API so no API call
         # is ever done twice, this is new this version.
-        logger.info(self.mypath + '\\archive.db')
+        root.info(self.mypath + '\\archive.db')
         self.archive = sqlite3.connect(self.mypath + '\\archive.db')
 
         # Create the Edge and Node tables for raw data
@@ -192,7 +210,7 @@ class main_data_crawler():
                               seed_nodes (name TEXT, seed_nodes TEXT)')
 
         # This database stores the unpacked data in the format used later.
-        self.database = sqlite3.connect(self.mypath + self.server_name + '.db')
+        self.database = sqlite3.connect(self.mypath + '\\' + self.server_name + '.db')
 
         # the data in two tables Eset and Node which have the format my code
         # actually uses and a third table history stores stat history data in
@@ -217,9 +235,9 @@ class main_data_crawler():
 
     # Gathers edges then gathers information on the nodes.
     def run(self):
-        print('Gathering edges')
+        root.info('Gathering edges')
         self.get_friendlist_network()
-        print('Gathering node attributes')
+        root.info('Gathering node attributes')
         self.get_node_attributes()
 
     # Crawls the friend list network.
@@ -229,7 +247,7 @@ class main_data_crawler():
         self.get_friends(self.listToCheck)
         while len(self.listToCheck) > 0:
             self.expand_graph()
-            print('Nodes left to check ' + str(len(self.listToCheck)))
+            root.info('Nodes left to check %s' % str(len(self.listToCheck)))
 
     def catagorize_friends(self, friend):
         '''
@@ -283,7 +301,7 @@ class main_data_crawler():
 
                         # Inserts the information into the Eset.
                         self.database.execute(
-                            'INSERT INTO '
+                            'INSERT OR REPLACE INTO '
                             + self.table_name +
                             'Eset (Source,Target,Status) Values(?,?,?)',
                             (i, Id, status))
@@ -292,8 +310,8 @@ class main_data_crawler():
                 Queue.add(i)
         Check = list(Check)
         Queue = list(Queue)
-        print('Queue len ' + str(len(Queue)))
-        print('Query len ' + str(len(Check)))
+        root.info('Queue len %s' % len(Queue))
+        root.info('Query len %s' % len(Check))
         # If there are nodes in check, fetch repeat.
         if len(Check) > 0:
             self.idDict = self.get_friends(Check)
@@ -306,7 +324,7 @@ class main_data_crawler():
         Returns a dictionary where the keys are Ids and values are
         their friends lists
         '''
-        print('Gathering friendlists')
+        root.info('Gathering friendlists')
         start_time = time.mktime(time.localtime())
         # Load existing values
         idDict = {}
@@ -318,29 +336,29 @@ class main_data_crawler():
         remaining_nodes = [n for n in to_check if n not in archive_id]
         for l in self.chunks(remaining_nodes, 40):
 
-            l = list(set(l))
+            L = list(set(l))
             url = ('http://census.daybreakgames.com/s:GraphSearch/get/'
                    + self.namespace + '/characters_friend/?character_id='
-                   + ','.join(l)
+                   + ','.join(L)
                    + '&c:resolve=world&c:show=character_id,world_id')
             time.sleep(2.0)
-            print(url)
+            root.info(url)
             decoded = fetch_url(url)
             results = decoded['characters_friend_list']
             for x in results:
                 # First dump the raw results of the call into a table
                 try:
                     self.archive.execute(
-                        'Insert into ' + self.table_name
+                        'INSERT OR REPLACE into ' + self.table_name
                         + 'Edge (Id,raw) VALUES(?,?)',
                         (x['character_id'], json.dumps(x))
                     )
                 except Exception:
                     # Usually when/if this fails its because the server is down
-                    print('archive failure')
-                    print((x['character_id'], json.dumps(x)))
+                    root.info('archive failure')
+                    root.info('%s %s' % (x['character_id'], json.dumps(x)))
                     if 'error' in str(decoded):
-                        print('Server down')
+                        root.info('Server down')
                         exit
                     else:
                         raise
@@ -355,11 +373,11 @@ class main_data_crawler():
             try:
                 idDict[f['character_id']] = f['friend_list']
             except Exception:
-                print('get friends error')
-                print(l)
-                print(f)
+                root.info('get friends error')
+                root.info(l)
+                root.info(f)
                 raise
-        print('Elapsed time:' + str(
+        root.info('Elapsed time: %s' % str(
             (time.mktime(time.localtime())-start_time)))
         return idDict
 
@@ -380,18 +398,17 @@ class main_data_crawler():
             self.archive, 'Select Id from ' + self.table_name + 'Node')
         remaining_nodes = [n for n in nodes if n not in archive_id]
         re_count = len(remaining_nodes)
-        print('Number of nodes in graph is: '
-              + str(len(nodes))
-              + ' Number of unarchived nodes is: '
-              + str(re_count))
+        root.info('Number of nodes in graph is: {} \
+            Number of unarchived nodes is: {}'.format(len(nodes), re_count)
+        )
         # Break the list up into chunks of 40
         smallLists = self.chunks(remaining_nodes, 40)
         i = 0
         for l in smallLists:
             # After 5000 iterations print the progress %.
             if i % 5000 == 0:
-                print('looking up data completion is at '
-                      + str(100*(i/re_count)) + '%')
+                root.info(
+                    'looking up data completion is at %s ' % i)
             url = ('http://census.daybreakgames.com/s:GraphSearch/get/'
                    + self.namespace + '/character/?character_id='
                    + ','.join(l)
@@ -402,14 +419,14 @@ class main_data_crawler():
                 # Unpack the server response and add each to the archive.
                 try:
                     self.archive.execute(
-                        'Insert into '
+                        'INSERT OR REPLACE into '
                         + self.table_name
                         + 'Node (Id,raw) VALUES(?,?)',
                         (x['character_id'], json.dumps(x)))
                 except Exception:
-                    print('archive failure')
+                    root.info('archive failure')
                     if 'error' in str(decoded):
-                        print('Server down')
+                        root.info('Server down')
                         exit
                     else:
                         raise
@@ -455,18 +472,15 @@ class main_data_crawler():
             stats = char_info.get(
                 'stats', {'placeholder': 'error2'}).get('stat_history')
             if type(stats) == list:
-                # If they add more stats the order of the deaths and kills
-                # this will likely change so these indices's would need
-                # to be changed.
-                D, K = stats[2], stats[5]
+                death_stats = [sd for sd in stats if sd['stat_name'] == 'deaths']
+                kill_stats = [sd for sd in stats if sd['stat_name'] == 'kills']
 
-                if D.get('stat_name') != 'deaths' or K.get('stat_name') != 'kills':
-                    print(Id)
-                    # print(stats)
-                    # break
-                    raise Exception("API encoding change")
-                kills = K.get('all_time', -1)
-                deaths = D.get('all_time', -1)
+                if len(death_stats) != 1:
+                    root.error(f"Incorrect number of kill stats {death_stats}")
+                if len(kill_stats) != 1:
+                    root.error(f"Incorrect number of kill stats {kill_stats}")
+                kills = death_stats[0].get('all_time', -1)
+                deaths = kill_stats[0].get('all_time', -1)
             else:
                 kills, deaths = -1, -1
             self.database.execute(stat_history_schema.format(self.table_name),
@@ -502,13 +516,13 @@ class main_data_crawler():
                 '&c:limit=',
                 str(limit)]
             url = ''.join(url_chunks)
-            print(url)
+            root.info(url)
             decoded = fetch_url(url)
             try:
                 H = decoded['leaderboard_list']
             except Exception:
-                print(decoded)
-                print(url)
+                root.info(decoded)
+                root.info(url)
             for characters in H:
                 Id = characters.get('character_id')
                 if Id is not None:
@@ -541,15 +555,15 @@ class main_data_crawler():
             self.archive,
             'Select Id from ' + self.table_name + 'Node')
         remaining_nodes = [n for n in G.nodes() if n not in archive_id]
-        print(remaining_nodes)
-        print('deleted for being problems')
+        root.info(remaining_nodes)
+        root.info('deleted for being problems')
         G.remove_nodes_from(remaining_nodes)
         for attr in graphml_attrs:
             try:
                 G = self.my_set_thing(G, attr, self.sql_columns_to_dicts(
                     'Node', attr, self.database))
             except Exception:
-                print('failure on ' + attr)
+                root.info('failure on %s' % attr)
                 raise
         nx.write_graphml(G, 'C:\\' + self.table_name + 'test.graphml')
 
@@ -600,7 +614,7 @@ def run_PS4():
     # Note that most of these servers have since been merged together.
     for initials in ['G', 'Cr', 'L', 'S', 'Ce', 'P']:
         x = main_data_crawler(initials)
-        print('Now crawling %s' % x.server_name)
+        root.info('Now crawling %s' % x.server_name)
         x.run()
 
 
@@ -608,7 +622,7 @@ def run_PC():
     # Crawl the 3 PC servers.
     for initials in ['E', 'C', 'M']:
         x = main_data_crawler(initials)
-        print('Now crawling %s' % x.server_name)
+        root.info('Now crawling %s' % x.server_name)
         x.run()
 
 

@@ -1,4 +1,4 @@
-'''
+"""
 Rewritten for readability but it keeps it original loop structure, it
 would be dishonest to change how I did it for the original data.
 
@@ -12,7 +12,7 @@ a Service ID of your own on the page they seem very
 
 The official limit on query's is no more than 100 in 1 minute, or you risk
 having your connection terminated or being banned outright from the API.
-'''
+"""
 
 
 import logging
@@ -26,27 +26,9 @@ import datetime
 import networkx as nx
 
 
-
-root = logging.getLogger(__name__)
-root.setLevel(logging.INFO)
-
-console_handle = logging.StreamHandler(sys.stdout)
-console_handle.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-console_handle.setFormatter(formatter)
-root.addHandler(console_handle)
-
-current_date = datetime.datetime.now().strftime("%B%d")
-log_path = os.path.join(
-    'C:\\Users\\jscle\\Desktop\\PS2-social-crawler',
-    '%s_logs.log' % current_date)
-with open(log_path, 'w') as f:
-    f.write('')
-file_handle = logging.FileHandler(log_path, 'w')
-
-file_handle.setLevel(logging.INFO)
-file_handle.setFormatter(formatter)
-root.addHandler(file_handle)
+logger = logging.getLogger(__name__)
+logging.basicConfig()
+logger.setLevel(logging.DEBUG)
 
 
 def singleCol(conn, query):
@@ -57,7 +39,7 @@ def multiCol(conn, query):
     return [list(i) for i in conn.execute(query).fetchall()]
 
 
-'''
+"""
 The Playstation 4 has 2 separate name spaces one for Europe and one for
 north America the correct name space must be used for each servers, those
 name spaces as well as the world Id numbers are contained in the following
@@ -78,48 +60,71 @@ The PC name space is ps2:v2
     Connery world_id = 1 Initial: C
     Emerald world_id = 17 Initial: E
     Miller world_id = 10 Initial: M
-'''
+"""
 namespace_dict = {
-    'P': 'ps2ps4us:v2', 'G': 'ps2ps4us:v2',
-    'S': 'ps2ps4us:v2', 'Cr': 'ps2ps4us:v2',
-    'Ce': 'ps2ps4eu:v2', 'L': 'ps2ps4eu:v2',
-    'C': 'ps2:v2', 'E': 'ps2:v2', 'M': 'ps2:v2'}
+    "P": "ps2ps4us:v2",
+    "G": "ps2ps4us:v2",
+    "S": "ps2ps4us:v2",
+    "Cr": "ps2ps4us:v2",
+    "Ce": "ps2ps4eu:v2",
+    "L": "ps2ps4eu:v2",
+    "C": "ps2:v2",
+    "E": "ps2:v2",
+    "M": "ps2:v2",
+}
 server_id_dict = {
-    'G': '1000', 'P': '1001', 'Cr': '1002',
-    'S': '1003', 'Ce': '2000', 'L': '2001',
-    'C': '1', 'E': '17', 'M': '10'}
+    "G": "1000",
+    "P": "1001",
+    "Cr": "1002",
+    "S": "1003",
+    "Ce": "2000",
+    "L": "2001",
+    "C": "1",
+    "E": "17",
+    "M": "10",
+}
 
 server_name_dict = {
-    'P': 'Palos', 'G': 'Genudine',
-    'Ce': 'Ceres', 'S': 'Searhus',
-    'L': 'Lithcorp', 'C': 'Connery',
-    'E': 'Emerald', 'M': 'Miller',
-    'Cr': 'Crux'}
+    "P": "Palos",
+    "G": "Genudine",
+    "Ce": "Ceres",
+    "S": "Searhus",
+    "L": "Lithcorp",
+    "C": "Connery",
+    "E": "Emerald",
+    "M": "Miller",
+    "Cr": "Crux",
+}
 
 
 def fetch_url(url):
     # Fetch the data from url
-    retries = 0
-    while retries < 5:
+    backoff = 1
+    while True:
         try:
-            jsonObj = urllib.request.urlopen(url)
-            decoded = json.loads(jsonObj.read().decode('utf8'))
-            return decoded
-        except Exception as err:
-            root.info(str(err))
-            root.info('sleeping for 35 seconds before retrying again')
-            time.sleep(35)
-        retries += 1
+            jsonObj = urllib.request.urlopen(url, timeout=30)
+
+        except Exception as e:
+            notice_str = ('While requesting {} caught exception {}; retry after {}').format(url, e, backoff)
+            if backoff < 10:
+                logger.debug(notice_str)
+            else:
+                logger.info(notice_str)
+            time.sleep(backoff)
+            backoff *= 2
+
+    decoded = json.loads(jsonObj.read().decode("utf8"))
+    return decoded
 
 
-eset_schema = '''
+eset_schema = """
     Create table if not exists {}Eset (
         Source TEXT,
         Target TEXT,
         Status TEXT
-    )'''
+    )"""
 
-node_schema = '''
+node_schema = """
     Create table if not exists {}Node (
         Id PRIMARY KEY,
         name TEXT,
@@ -134,35 +139,35 @@ node_schema = '''
         last_login_date INTEGER,
         kills INTEGER,
         deaths INTEGER
-    )'''
+    )"""
 
-history_schema = '''Create table if not exists {}History (
+history_schema = """Create table if not exists {}History (
         Id PRIMARY KEY,
         history TEXT
-    )'''
+    )"""
 
-stat_history_schema = '''
+stat_history_schema = """
     INSERT or replace INTO {}History (Id, history) VALUES(?, ?)
-    '''
+    """
 
-char_data_schema = '''
+char_data_schema = """
     INSERT or replace INTO {}Node (
         Id, name, faction, br,
         outfitTag, outfitId, outfitSize,
         creation_date, login_count, minutes_played, last_login_date,
         kills, deaths)
         Values(?,?,?,?,?,?,?,?,?,?,?,?,?)
-    '''
+    """
 
 
-class main_data_crawler():
+class main_data_crawler:
     """
     Contains all the methods settings etc needed to build the friend-list graph
     and fetch node attributes of a server in planetside2. The class takes the
     initial of the server to make a graph of when it is first called.
     """
 
-    def __init__(self, server_inital):
+    def __init__(self, server_inital, database_path=None):
 
         """
         This limits strain on the database by restricting our attention to only
@@ -177,8 +182,12 @@ class main_data_crawler():
         self.server_id = server_id_dict[server_inital]
         self.server_name = server_name_dict[server_inital]
 
-        self.table_name = self.server_name + self.DT.strftime("%B") +\
-            str(self.DT.day) + str(self.DT.year)
+        self.table_name = (
+            self.server_name
+            + self.DT.strftime("%B")
+            + str(self.DT.day)
+            + str(self.DT.year)
+        )
 
         # The set done contains every node we have already examined
         # including those rejected as too old or otherwise invalid.
@@ -191,26 +200,36 @@ class main_data_crawler():
         # I have two computers and thus two paths to the Dropbox.
         # You will want to replace self.mypath with whatever path
         # you want to use for storing your data.
-        self.mypath = os.path.join('D:', 'Dropbox', 'Dropbox', 'Data2018')
+        if database_path is None:
+            self.mypath = os.path.join("D:", "Dropbox", "Dropbox", "Data2018")
+        else:
+            self.mypath = database_path
 
         # The archive database saves the responses from the API so no API call
         # is ever done twice, this is new this version.
-        root.info(self.mypath + '\\archive.db')
-        self.archive = sqlite3.connect(self.mypath + '\\archive.db')
+
+        archive_path = os.path.join(self.mypath, "archive.db")
+        logger.info(archive_path)
+        self.archive = sqlite3.connect(archive_path)
 
         # Create the Edge and Node tables for raw data
-        self.archive.execute('Create table if not exists ' + self.table_name +
-                             'Edge (Id Primary key,raw TEXT)')
-        self.archive.execute('Create table if not exists ' + self.table_name +
-                             'Node (Id Primary key, raw TEXT)')
+        self.archive.execute(
+            f"Create table if not exists {self.table_name}Edge (Id Primary key,raw TEXT)"
+        )
+        self.archive.execute(
+            f"Create table if not exists {self.table_name}Node (Id Primary key, raw TEXT)"
+        )
 
         # The seed_node table records the set of seed nodes just in case it is
         # needed for debugging or some unforeseen purpose.
-        self.archive.execute('Create table if not exists \
-                              seed_nodes (name TEXT, seed_nodes TEXT)')
+        self.archive.execute(
+            "Create table if not exists seed_nodes (name TEXT, seed_nodes TEXT)"
+        )
 
         # This database stores the unpacked data in the format used later.
-        self.database = sqlite3.connect(self.mypath + '\\' + self.server_name + '.db')
+
+        database_path = os.path.join(self.mypath, f"{self.server_name}.db")
+        self.database = sqlite3.connect(database_path)
 
         # the data in two tables Eset and Node which have the format my code
         # actually uses and a third table history stores stat history data in
@@ -222,22 +241,22 @@ class main_data_crawler():
         # Get the starting nodes from the leader-boards.
         # If we already have seed nodes for the day simply retrieve them,
         # otherwise gather some.
-        existing_seeds = singleCol(self.archive, 'SELECT name from seed_nodes')
+        existing_seeds = singleCol(self.archive, "SELECT name from seed_nodes")
 
         if self.table_name in existing_seeds:
             seed = singleCol(
                 self.archive,
-                'SELECT seed_nodes from seed_nodes where name = "' +
-                self.table_name + '"')[0]
-            self.listToCheck = seed.split(',')
+                f"SELECT seed_nodes from seed_nodes where name = \"{self.table_name}\"",
+            )[0]
+            self.listToCheck = seed.split(",")
         else:
             self.listToCheck = self.leader_board_sample(75)
 
     # Gathers edges then gathers information on the nodes.
     def run(self):
-        root.info('Gathering edges')
+        logger.info("Gathering edges")
         self.get_friendlist_network()
-        root.info('Gathering node attributes')
+        logger.info("Gathering node attributes")
         self.get_node_attributes()
 
     # Crawls the friend list network.
@@ -247,32 +266,32 @@ class main_data_crawler():
         self.get_friends(self.listToCheck)
         while len(self.listToCheck) > 0:
             self.expand_graph()
-            root.info('Nodes left to check %s' % str(len(self.listToCheck)))
+            logger.info("Nodes left to check %s" % str(len(self.listToCheck)))
 
     def catagorize_friends(self, friend):
-        '''
+        """
         Edges status logic as follows:
         Old: Friends who have not logged on since self.tSinceLogin
         cross server: Friends who are on different servers
         Both: both old and cross server (these are so rare...)
         normal: The rest
-        '''
-        Id = friend.get('character_id', -1)
-        world_id = friend.get('world_id', -1)
-        last_online = int(friend.get('last_login_time', -1))
+        """
+        Id = friend.get("character_id", -1)
+        world_id = friend.get("world_id", -1)
+        last_online = int(friend.get("last_login_time", -1))
 
         self.done.add(Id)
         if last_online > self.tSinceLogin:
             if int(world_id) == int(self.server_id):
-                return 'normal'
+                return "normal"
             else:
-                return 'cross server'
+                return "cross server"
         else:
             if int(world_id) == int(self.server_id):
-                return 'old'
+                return "old"
             else:
-                return 'both'
-        return 'error'
+                return "both"
+        return "error"
 
     # Updates the list of nodes to Check and manages what nodes to ask the API
     # about, also saves data to the SQL database.
@@ -290,28 +309,28 @@ class main_data_crawler():
                 self.done.add(i)
                 for friend in friend_list:
 
-                    Id = friend.get('character_id', -1)
+                    Id = friend.get("character_id", -1)
 
                     if Id not in self.done:
 
                         status = self.catagorize_friends(friend)
                         # Add normal characters to the Queue.
-                        if status == 'normal':
+                        if status == "normal":
                             Queue.add(Id)
 
                         # Inserts the information into the Eset.
                         self.database.execute(
-                            'INSERT OR REPLACE INTO '
-                            + self.table_name +
-                            'Eset (Source,Target,Status) Values(?,?,?)',
-                            (i, Id, status))
+                            f"INSERT OR REPLACE INTO {self.table_name}Eset "
+                            "(Source,Target,Status) Values(?,?,?)",
+                            (i, Id, status),
+                        )
             else:
                 Check.add(i)
                 Queue.add(i)
         Check = list(Check)
         Queue = list(Queue)
-        root.info('Queue len %s' % len(Queue))
-        root.info('Query len %s' % len(Check))
+        logger.info("Queue len %s" % len(Queue))
+        logger.info("Query len %s" % len(Check))
         # If there are nodes in check, fetch repeat.
         if len(Check) > 0:
             self.idDict = self.get_friends(Check)
@@ -320,86 +339,91 @@ class main_data_crawler():
         self.database.commit()
 
     def get_friends(self, to_check):
-        '''
+        """
         Returns a dictionary where the keys are Ids and values are
         their friends lists
-        '''
-        root.info('Gathering friendlists')
+        """
+        logger.info("Gathering friendlists")
         start_time = time.mktime(time.localtime())
         # Load existing values
         idDict = {}
         # All nodes we have a archived friends-list for already.
         archive_id = singleCol(
-            self.archive,
-            'Select Id from ' + self.table_name + 'Edge')
+            self.archive, "Select Id from " + self.table_name + "Edge"
+        )
         # List of all nodes for which no archived value exists.
         remaining_nodes = [n for n in to_check if n not in archive_id]
         for l in self.chunks(remaining_nodes, 40):
 
             L = list(set(l))
-            url = ('http://census.daybreakgames.com/s:GraphSearch/get/'
-                   + self.namespace + '/characters_friend/?character_id='
-                   + ','.join(L)
-                   + '&c:resolve=world&c:show=character_id,world_id')
-            time.sleep(2.0)
-            root.info(url)
+            url = (
+                "http://census.daybreakgames.com/s:GraphSearch/get/{namespace}/"
+                "characters_friend/?character_id={character_ids}&c:resolve=world"
+                "&c:show=character_id,world_id"
+            ).format(namespace=self.namespace, character_ids=",".join(L))
+
+            logger.info(url)
             decoded = fetch_url(url)
-            results = decoded['characters_friend_list']
+            results = decoded["characters_friend_list"]
             for x in results:
                 # First dump the raw results of the call into a table
                 try:
                     self.archive.execute(
-                        'INSERT OR REPLACE into ' + self.table_name
-                        + 'Edge (Id,raw) VALUES(?,?)',
-                        (x['character_id'], json.dumps(x))
+                        f"INSERT OR REPLACE into {self.table_name}Edge (Id,raw) VALUES(?,?)",
+                        (x["character_id"], json.dumps(x)),
                     )
                 except Exception:
                     # Usually when/if this fails its because the server is down
-                    root.info('archive failure')
-                    root.info('%s %s' % (x['character_id'], json.dumps(x)))
-                    if 'error' in str(decoded):
-                        root.info('Server down')
+                    logger.info("archive failure")
+                    logger.info("{} {}".format(x["character_id"], json.dumps(x)))
+                    if "error" in str(decoded):
+                        logger.info("Server down")
                         exit
                     else:
                         raise
             for f in results:
-                idDict[f['character_id']] = f['friend_list']
+                idDict[f["character_id"]] = f["friend_list"]
             self.archive.commit()
+            time.sleep(2.0)
         # Load in the friends-list from any stored results we may already have
-        archived_friends_lists = self.sql_columns_to_dicts(
-            'Edge', 'raw', self.archive)
+        archived_friends_lists = self.sql_columns_to_dicts("Edge", "raw", self.archive)
         for l in [i for i in to_check if i not in remaining_nodes]:
             f = json.loads(archived_friends_lists[l])
             try:
-                idDict[f['character_id']] = f['friend_list']
+                idDict[f["character_id"]] = f["friend_list"]
             except Exception:
-                root.info('get friends error')
-                root.info(l)
-                root.info(f)
+                logger.info("get friends error")
+                logger.info(l)
+                logger.info(f)
                 raise
-        root.info('Elapsed time: %s' % str(
-            (time.mktime(time.localtime())-start_time)))
+        logger.info(
+            "Elapsed time: %s" % str((time.mktime(time.localtime()) - start_time))
+        )
         return idDict
 
     # Gathers all node attributes.
     def get_node_attributes(self):
         edges = multiCol(
             self.database,
-            'SELECT Source,Target from ' + self.table_name
-            + 'Eset where Status="normal"')
+            f"SELECT Source,Target FROM {self.table_name}Eset WHERE Status=\"normal\"",
+        )
         G = nx.Graph()
         G.add_edges_from(edges)
         self.getCharData(G.nodes())
         self.interp_character_data()
 
     def getCharData(self, nodes):
+
+        logger.debug(f'getCharData for {nodes}')
+
         # Gets character attributes for each found in the friend lists
         archive_id = singleCol(
-            self.archive, 'Select Id from ' + self.table_name + 'Node')
+            self.archive, f"SELECT Id from {self.table_name}Node"
+        )
         remaining_nodes = [n for n in nodes if n not in archive_id]
         re_count = len(remaining_nodes)
-        root.info('Number of nodes in graph is: {} \
-            Number of unarchived nodes is: {}'.format(len(nodes), re_count)
+        logger.info(
+            f"Number of nodes in graph is: {len(nodes)} Number of unarchived nodes is: {re_count}"
         )
         # Break the list up into chunks of 40
         smallLists = self.chunks(remaining_nodes, 40)
@@ -407,26 +431,28 @@ class main_data_crawler():
         for l in smallLists:
             # After 5000 iterations print the progress %.
             if i % 5000 == 0:
-                root.info(
-                    'looking up data completion is at %s ' % i)
-            url = ('http://census.daybreakgames.com/s:GraphSearch/get/'
-                   + self.namespace + '/character/?character_id='
-                   + ','.join(l)
-                   + '&c:resolve=outfit,name,stats,times,stat_history')
+                logger.info(f"looking up data completion is at {i} ")
+            url = ("http://census.daybreakgames.com/s:GraphSearch/get/"
+                   "{namespace}/character/?character_id={character_ids}"
+                   "&c:resolve=outfit,name,stats,times,stat_history"
+                   ).format(namespace=self.namespace, character_ids=",".join(l))
+            logger.debug(f'fetching {url}')
             decoded = fetch_url(url)
-            results = decoded['character_list']
+
+            logger.debug(f'{decoded}')
+
+            results = decoded["character_list"]
             for x in results:
                 # Unpack the server response and add each to the archive.
                 try:
                     self.archive.execute(
-                        'INSERT OR REPLACE into '
-                        + self.table_name
-                        + 'Node (Id,raw) VALUES(?,?)',
-                        (x['character_id'], json.dumps(x)))
+                        f"INSERT OR REPLACE into {self.table_name}Node (Id,raw) VALUES(?,?)",
+                        (x["character_id"], json.dumps(x)),
+                    )
                 except Exception:
-                    root.info('archive failure')
-                    if 'error' in str(decoded):
-                        root.info('Server down')
+                    logger.info("archive failure")
+                    if "error" in str(decoded):
+                        logger.info("Server down")
                         exit
                     else:
                         raise
@@ -436,95 +462,107 @@ class main_data_crawler():
             time.sleep(2.0)
 
     def interp_character_data(self):
-        '''Unpacks the character data gathered previously,
+        """Unpacks the character data gathered previously,
         reading the raw data from the archive and writing it into the database.
-        '''
+        """
         completed_id = singleCol(
-            self.database, 'SELECT Id from ' + self.table_name + 'Node')
+            self.database, "SELECT Id from " + self.table_name + "Node"
+        )
         results = []
-        get_unpacked = 'SELECT Id,raw from {}Node'.format(self.table_name)
+        get_unpacked = "SELECT Id,raw from {}Node".format(self.table_name)
         for raw in multiCol(self.archive, get_unpacked):
             if raw[0] not in completed_id:
                 results.append(json.loads(raw[1]))
         # Unpack and add it to the snapshots.
         for char_info in results:
             # Basic avatar information.
-            Id = int(char_info.get('character_id', '0000000000000000000'))
-            name = char_info['name'].get('first', 'not available')
-            faction_id = char_info.get('faction_id', -1)
-            faction = {'1': 'VS', '2': 'NC', '3': 'TR'}.get(
-                faction_id, 'has no faction')
-            br = char_info.get('battle_rank', {'value': '-1'})['value']
+            Id = int(char_info.get("character_id", "0000000000000000000"))
+            name = char_info["name"].get("first", "not available")
+            faction_id = char_info.get("faction_id", -1)
+            faction = {"1": "VS", "2": "NC", "3": "TR"}.get(
+                faction_id, "has no faction"
+            )
+            br = char_info.get("battle_rank", {"value": "-1"})["value"]
             # Time data:
-            tInfo = char_info.get('times')
-            creation_date = tInfo.get('creation', '0')
-            login_count = tInfo.get('login_count', '0')
-            minutes_played = tInfo.get('minutes_played', '0')
-            last_login_date = tInfo.get('last_login', '0')
+            tInfo = char_info.get("times")
+            creation_date = tInfo.get("creation", "0")
+            login_count = tInfo.get("login_count", "0")
+            minutes_played = tInfo.get("minutes_played", "0")
+            last_login_date = tInfo.get("last_login", "0")
             # Outfit data:
-            o = char_info.get('outfit', {'placeholder': 'error2'})
-            outfitTag = o.get('alias', -1)
+            o = char_info.get("outfit", {"placeholder": "error2"})
+            outfitTag = o.get("alias", -1)
             # outfitName = o.get('name', 'not available')
-            outfitId = o.get('outfit_id', -1)
-            outfitSize = o.get('member_count', -1)
+            outfitId = o.get("outfit_id", -1)
+            outfitSize = o.get("member_count", -1)
             # Stat history is formatted differently, it returns a list
             # of stats of dictionaries containing the stat history:
-            stats = char_info.get(
-                'stats', {'placeholder': 'error2'}).get('stat_history')
+            stats = char_info.get("stats", {"placeholder": "error2"}).get(
+                "stat_history"
+            )
             if type(stats) == list:
-                death_stats = [sd for sd in stats if sd['stat_name'] == 'deaths']
-                kill_stats = [sd for sd in stats if sd['stat_name'] == 'kills']
+                death_stats = [sd for sd in stats if sd["stat_name"] == "deaths"]
+                kill_stats = [sd for sd in stats if sd["stat_name"] == "kills"]
 
                 if len(death_stats) != 1:
-                    root.error(f"Incorrect number of kill stats {death_stats}")
+                    logger.error(f"Incorrect number of kill stats {death_stats}")
                 if len(kill_stats) != 1:
-                    root.error(f"Incorrect number of kill stats {kill_stats}")
-                kills = death_stats[0].get('all_time', -1)
-                deaths = kill_stats[0].get('all_time', -1)
+                    logger.error(f"Incorrect number of kill stats {kill_stats}")
+                kills = death_stats[0].get("all_time", -1)
+                deaths = kill_stats[0].get("all_time", -1)
             else:
                 kills, deaths = -1, -1
-            self.database.execute(stat_history_schema.format(self.table_name),
-                                  (Id, json.dumps(stats)))
+            self.database.execute(
+                stat_history_schema.format(self.table_name), (Id, json.dumps(stats))
+            )
 
             self.database.execute(
                 char_data_schema.format(self.table_name),
-                (Id, name, faction, br, outfitTag, outfitId, outfitSize,
-                 creation_date, login_count, minutes_played,
-                 last_login_date, kills, deaths))
+                (
+                    Id,
+                    name,
+                    faction,
+                    br,
+                    outfitTag,
+                    outfitId,
+                    outfitSize,
+                    creation_date,
+                    login_count,
+                    minutes_played,
+                    last_login_date,
+                    kills,
+                    deaths,
+                ),
+            )
 
         self.database.commit()
 
     def leader_board_sample(self, limit=50):
-        '''
+        """
         I have used more than one method to get the initial list of
         character Ids. The first version simply used the id's of characters
         I was knew of. This new version is a bit less biased It gathers the
         players who were in the top limit places on the current leader-board
         for all areas of the leader-board available.
         Note that all leader-board stats are strongly correlated.
-        '''
+        """
 
         seed_ids = []
-        for leaderboard_type in ['Kills', 'Time', 'Deaths', 'Score']:
-            url_chunks = [
-                'http://census.daybreakgames.com/s:GraphSearch/get/',
-                self.namespace,
-                '/leaderboard/?name=',
-                leaderboard_type,
-                '&period=Forever&world=',
-                self.server_name,
-                '&c:limit=',
-                str(limit)]
-            url = ''.join(url_chunks)
-            root.info(url)
+        for leaderboard_type in ["Kills", "Time", "Deaths", "Score"]:
+            url = ("http://census.daybreakgames.com/s:GraphSearch/get/"
+                   "{namespace}/leaderboard/?name={leaderboard_type}"
+                   "&period=Forever&world={server}&c:limit={limit}"
+            ).format(namespace=self.namespace, leaderboard_type=leaderboard_type,
+            server=self.server_name, limit=limit)
+            logger.info(url)
             decoded = fetch_url(url)
             try:
-                H = decoded['leaderboard_list']
+                H = decoded["leaderboard_list"]
             except Exception:
-                root.info(decoded)
-                root.info(url)
+                logger.info(decoded)
+                logger.info(url)
             for characters in H:
-                Id = characters.get('character_id')
+                Id = characters.get("character_id")
                 if Id is not None:
                     seed_ids.append(Id)
         unique = list(set(seed_ids))
@@ -533,98 +571,115 @@ class main_data_crawler():
         # It probably isn't needed but....
         self.archive.execute("PRAGMA busy_timeout = 30000")
         self.archive.execute(
-            'INSERT INTO seed_nodes (name,seed_nodes) VALUES(?,?)',
-            (self.table_name, ','.join(unique)))
+            "INSERT INTO seed_nodes (name,seed_nodes) VALUES(?,?)",
+            (self.table_name, ",".join(unique)),
+        )
         return seed_ids
 
     # Returns the graph and writes it to the desktop for testing in Gephi.
-    def save_graph_to_graphml(self, xtend=''):
+    def save_graph_to_graphml(self, xtend=""):
         graphml_attrs = [
-            'name', 'faction', 'br', 'outfitTag', 'outfitId',
-            'outfitSize', 'creation_date', 'login_count', 'minutes_played',
-            'last_login_date']
+            "name",
+            "faction",
+            "br",
+            "outfitTag",
+            "outfitId",
+            "outfitSize",
+            "creation_date",
+            "login_count",
+            "minutes_played",
+            "last_login_date",
+        ]
         edge_raw = multiCol(
             self.database,
-            'SELECT * FROM ' + self.table_name + 'Eset where Status="normal"')
+            f"SELECT * FROM {self.table_name}Eset where Status=\"normal\"",
+        )
         G = nx.Graph()
         for edge in edge_raw:
-            if edge[2] == 'normal':
+            if edge[2] == "normal":
                 G.add_edge(edge[0], edge[1])
-                G[edge[0]][edge[1]]['status'] = edge[2]
+                G[edge[0]][edge[1]]["status"] = edge[2]
         archive_id = singleCol(
-            self.archive,
-            'Select Id from ' + self.table_name + 'Node')
+            self.archive, f"Select Id from {self.table_name}Node"
+        )
         remaining_nodes = [n for n in G.nodes() if n not in archive_id]
-        root.info(remaining_nodes)
-        root.info('deleted for being problems')
+        logger.info(remaining_nodes)
+        logger.info("deleted for being problems")
         G.remove_nodes_from(remaining_nodes)
         for attr in graphml_attrs:
             try:
-                G = self.my_set_thing(G, attr, self.sql_columns_to_dicts(
-                    'Node', attr, self.database))
+                G = self.my_set_thing(
+                    G, attr, self.sql_columns_to_dicts("Node", attr, self.database)
+                )
             except Exception:
-                root.info('failure on %s' % attr)
+                logger.info("failure on %s" % attr)
                 raise
-        nx.write_graphml(G, 'C:\\' + self.table_name + 'test.graphml')
+        graphml_path = os.path.join("C:", f"{self.table_name}test.graphml")
+        nx.write_graphml(G, graphml_path)
 
         return G
 
     def my_set_thing(self, G, attri_name, a_dict):
-        '''
+        """
         Sets all nodes in graph G with a new attribute named attri_name using
         values found in a_dict. Networkx has a function that does this but it
-        always throws errors if the dict is missing any values in the graph.'''
+        always throws errors if the dict is missing any values in the graph."""
 
         for n in G.nodes():
             G.node[n][attri_name] = a_dict[n]
         return G
 
-    def sql_columns_to_dicts(self, table, col_name, connection):
-        '''
+    def sql_columns_to_dicts(self, table_type, col_name, connection):
+        """
         Converts a SQL column to a dictionary keys are the character Id and
-        values are whatever is in the column named col_name'''
+        values are whatever is in the column named col_name
+
+        Args:
+            table is either Node or Edge
+        """
         d = {}
         val = multiCol(
             connection,
-            'SELECT Id,' + col_name + ' FROM ' + self.table_name + table)
+            f"SELECT Id,{col_name} FROM {self.table_name}{table_type}"
+        )
         for i in val:
             d[str(i[0])] = i[1]
         return d
 
     def clear_results(self):
-        '''
+        """
         Erase the tables in the database created by this class.
         In theory there is no situation where we would need to remove archived
         values.
-        '''
-        self.database.execute('DROP TABLE '+self.table_name+'Eset')
-        self.database.execute('DROP TABLE '+self.table_name+'Node')
-        self.database.execute('DROP TABLE '+self.table_name+'History')
+        """
+        self.database.execute(f"DROP TABLE {self.table_name}Eset")
+        self.database.execute(f"DROP TABLE {self.table_name}Node")
+        self.database.execute(f"DROP TABLE {self.table_name}History")
 
     def chunks(self, alist, n):
-        '''Breaks a list into a list of length n list.'''
+        """Breaks a list into a list of length n list."""
         outList = []
         for i in range(0, len(alist), n):
-            outList.append(alist[i:i+n])
+            outList.append(alist[i : i + n])
         return outList
 
 
-def run_PS4():
+def run_PS4(database_path=None):
     # Crawl the playstation 4 servers.
     # Note that most of these servers have since been merged together.
-    for initials in ['G', 'Cr', 'L', 'S', 'Ce', 'P']:
-        x = main_data_crawler(initials)
-        root.info('Now crawling %s' % x.server_name)
-        x.run()
+    for initials in ["G", "Cr", "L", "S", "Ce", "P"]:
+        server_crawler = main_data_crawler(initials, database_path)
+        logger.info(f"Now crawling {server_crawler.server_name}")
+        server_crawler.run()
 
 
-def run_PC():
+def run_PC(database_path=None):
     # Crawl the 3 PC servers.
-    for initials in ['E', 'C', 'M']:
-        x = main_data_crawler(initials)
-        root.info('Now crawling %s' % x.server_name)
-        x.run()
+    for initials in ["E", "C", "M"]:
+        server_crawler = main_data_crawler(initials, database_path)
+        logger.info(f"Now crawling {server_crawler.server_name}")
+        server_crawler.run()
 
 
 if __name__ == "__main__":
-    run_PC()
+    run_PC(".")

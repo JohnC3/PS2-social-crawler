@@ -37,7 +37,7 @@ with open('local_config.json', 'r') as json_conf:
 SERVICE_ID = config_dict['service_id']
 DATABASE_PATH = os.path.join(*config_dict['database_path'])
 RETRY_CAP = config_dict['retry_cap']
-COOLDOWN = 20.0
+COOLDOWN = 5.0
 MAX_INACTIVE_DAYS = 21
 FRIEND_BATCH_SIZE = 40
 
@@ -177,13 +177,13 @@ def build_database_tables(server_initial: str):
     archive = sqlite3.connect(archive_path)
 
     archive_setup_script = f"""
-    Create table if not exists {table_name}Edge (Id Primary key,raw TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}Edge (Id Primary key,raw TEXT);
 
-    Create table if not exists {table_name}Node (Id Primary key, raw TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}Node (Id Primary key, raw TEXT);
 
     -- The seed_node table records the set of seed nodes just in case it is
     -- needed for debugging or some unforeseen purpose.
-    Create table if not exists seed_nodes (name TEXT, seed_nodes TEXT);
+    CREATE TABLE IF NOT EXISTS seed_nodes (name TEXT, seed_nodes TEXT);
     """
 
     archive.executescript(archive_setup_script)
@@ -197,13 +197,13 @@ def build_database_tables(server_initial: str):
 
     # This database stores the unpacked data in the format used later.
     output_setup_script = f"""
-    Create table if not exists {table_name}Eset (Source TEXT, Target TEXT, Status TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}Eset (Source TEXT, Target TEXT, Status TEXT);
 
-    Create table if not exists {table_name}Node (Id PRIMARY KEY, name TEXT, faction TEXT, br INTEGER, 
+    CREATE TABLE IF NOT EXISTS {table_name}Node (Id PRIMARY KEY, name TEXT, faction TEXT, br INTEGER, 
         outfitTag TEXT, outfitId INTEGER, outfitSize INTEGER, creation_date INTEGER, login_count INTEGER, 
         minutes_played INTEGER, last_login_date INTEGER, kills INTEGER, deaths INTEGER);  
 
-    Create table if not exists {table_name}History (Id PRIMARY KEY, history TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}History (Id PRIMARY KEY, history TEXT);
     """
 
     database.executescript(output_setup_script)

@@ -35,6 +35,8 @@ with open('local_config.json', 'r') as json_conf:
 SERVICE_ID = config_dict['service_id']
 DATABASE_PATH = config_dict['database_path']
 RETRY_CAP = config_dict['retry_cap']
+COOLDOWN = 20.0
+MAX_INACTIVE_DAYS = 21
 
 
 def singleCol(conn, query):
@@ -182,7 +184,7 @@ class main_data_crawler:
         those nodes active in last 44.25 days."""
         self.curTime = time.mktime(time.localtime())
         self.DT = datetime.datetime.now()
-        self.tSinceLogin = self.curTime - 3824794
+        self.tSinceLogin = self.curTime - MAX_INACTIVE_DAYS * 24 * 3600
         # Using the dictionaries above get the name space server Id and
         # server name of the server we wish to crawl.
         # Remember you can change these class variables if needed.
@@ -209,7 +211,7 @@ class main_data_crawler:
         # You will want to replace self.mypath with whatever path
         # you want to use for storing your data.
         if database_path is None:
-            self.mypath = os.path.join(DATABASE_PATH)
+            self.mypath = os.path.join(*DATABASE_PATH)
         else:
             self.mypath = database_path
 
@@ -276,7 +278,7 @@ class main_data_crawler:
             self.expand_graph()
             logger.info("Nodes left to check %s" % str(len(self.listToCheck)))
 
-    def catagorize_friends(self, friend):
+    def categorize_friends(self, friend):
         """
         Edges status logic as follows:
         Old: Friends who have not logged on since self.tSinceLogin
@@ -321,7 +323,7 @@ class main_data_crawler:
 
                     if Id not in self.done:
 
-                        status = self.catagorize_friends(friend)
+                        status = self.categorize_friends(friend)
                         # Add normal characters to the Queue.
                         if status == "normal":
                             Queue.add(Id)
@@ -361,7 +363,11 @@ class main_data_crawler:
         )
         # List of all nodes for which no archived value exists.
         remaining_nodes = [n for n in to_check if n not in archive_id]
-        for l in self.chunks(remaining_nodes, 40):
+
+        batched_remaining_nodes = self.chunks(remaining_nodes, 40)
+        total_batches = len(batched_remaining_nodes)
+
+        for batch_number, l in enumerate(batched_remaining_nodes):
 
             L = list(set(l))
             character_ids = ",".join(L)
@@ -369,7 +375,7 @@ class main_data_crawler:
                   f"characters_friend/?character_id={character_ids}&c:resolve=world"\
                   f"&c:show=character_id,world_id"
 
-            logger.info(url)
+            logger.info(f"[{batch_number} of {total_batches}] {url}")
             decoded = fetch_url(url)
             results = decoded["characters_friend_list"]
             for x in results:
@@ -381,6 +387,8 @@ class main_data_crawler:
                     )
                 except Exception:
                     # Usually when/if this fails its because the server is down
+                    # TODO: Properly handle the exceptions as they happen. Separate the insertion exceptions from
+                    #  connection issues etc
                     logger.info("archive failure")
                     logger.info("{} {}".format(x["character_id"], json.dumps(x)))
                     if "error" in str(decoded):
@@ -391,7 +399,7 @@ class main_data_crawler:
             for f in results:
                 idDict[f["character_id"]] = f["friend_list"]
             self.archive.commit()
-            time.sleep(2.0)
+            time.sleep(COOLDOWN)
         # Load in the friends-list from any stored results we may already have
         archived_friends_lists = self.sql_columns_to_dicts("Edge", "raw", self.archive)
         for l in [i for i in to_check if i not in remaining_nodes]:
@@ -467,7 +475,7 @@ class main_data_crawler:
             self.archive.commit()
             i = i + 40
             # 2 second wait seems to be enough to avoid hitting API soft limit
-            time.sleep(2.0)
+            time.sleep(COOLDOWN)
 
     def interp_character_data(self):
         """Unpacks the character data gathered previously,
@@ -683,7 +691,8 @@ def run_PS4(database_path=None):
 
 def run_PC(database_path=None):
     # Crawl the 3 PC servers.
-    for initials in ["E", "C", "M"]:
+    # for initials in ["E", "C", "M"]:
+    for initials in ["C"]:
         server_crawler = main_data_crawler(initials, database_path)
         logger.info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()

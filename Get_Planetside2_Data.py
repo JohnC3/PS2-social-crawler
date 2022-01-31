@@ -1,8 +1,5 @@
 """
-Rewritten for readability but it keeps it original loop structure, it
-would be dishonest to change how I did it for the original data.
-
-Read through everything carefully the structure is very odd.
+Updated 2022 to account for census API changes. And to account for the fact I know how to code now. :P
 
 This code builds a graph of the frendslist of active characters in the MMO
 planetside 2 by using the census API.
@@ -37,16 +34,16 @@ with open('local_config.json', 'r') as json_conf:
 SERVICE_ID = config_dict['service_id']
 DATABASE_PATH = os.path.join(*config_dict['database_path'])
 RETRY_CAP = config_dict['retry_cap']
-COOLDOWN = 5.0
+COOL_DOWN = 5.0
 MAX_INACTIVE_DAYS = 21
 FRIEND_BATCH_SIZE = 40
 
 
-def singleCol(conn, query):
+def single_column(conn, query):
     return [i[0] for i in conn.execute(query).fetchall()]
 
 
-def multiCol(conn, query):
+def multi_column(conn, query):
     return [list(i) for i in conn.execute(query).fetchall()]
 
 
@@ -130,6 +127,10 @@ def fetch_url(url):
                 raise GiveUpException(f"GiveUpException: because {decoded}")
             return decoded
 
+        except GiveUpException as stop:
+            # Don't handle such exceptions
+            raise stop
+
         except Exception as e:
             if 'WinError 10054' in str(e):
                 # The connection has been terminated, don't know why, but stop harassing the server about it.
@@ -160,21 +161,7 @@ char_data_schema = """
     """
 
 
-def build_database_tables(server_initial: str):
-    DT = datetime.datetime.now()
-    # Using the dictionaries above get the name space server Id and
-    # server name of the server we wish to crawl.
-    # Remember you can change these class variables if needed.
-    server_name = server_name_dict[server_initial]
-
-    table_name = server_name + DT.strftime("%B") + str(DT.day) + str(DT.year)
-
-    # The archive database saves the responses from the API so no API call
-    # is ever done twice, this is new this version.
-
-    archive_path = os.path.join(DATABASE_PATH, "archive.db")
-    logger.info(archive_path)
-    archive = sqlite3.connect(archive_path)
+def build_database_tables(table_name: str, archive_connection, output_connection):
 
     archive_setup_script = f"""
     CREATE TABLE IF NOT EXISTS {table_name}Edge (Id Primary key,raw TEXT);
@@ -184,12 +171,11 @@ def build_database_tables(server_initial: str):
     -- The seed_node table records the set of seed nodes just in case it is
     -- needed for debugging or some unforeseen purpose.
     CREATE TABLE IF NOT EXISTS seed_nodes (name TEXT, seed_nodes TEXT);
+    
+    CREATE TABLE IF NOT EXISTS {table_name}problem_character_ids (character_id TEXT);
     """
 
-    archive.executescript(archive_setup_script)
-
-    database_path = os.path.join(DATABASE_PATH, f"{server_name}.db")
-    database = sqlite3.connect(database_path)
+    archive_connection.executescript(archive_setup_script)
 
     # the data in two tables Eset and Node which have the format my code
     # actually uses and a third table history stores stat history data in
@@ -206,7 +192,7 @@ def build_database_tables(server_initial: str):
     CREATE TABLE IF NOT EXISTS {table_name}History (Id PRIMARY KEY, history TEXT);
     """
 
-    database.executescript(output_setup_script)
+    output_connection.executescript(output_setup_script)
 
 
 def fetch_friend_lists_for_characters(namespace, character_list: List[str], problematic_character_ids: List[int]
@@ -267,7 +253,7 @@ class MainDataCrawler:
     initial of the server to make a graph of when it is first called.
     """
 
-    def __init__(self, server_inital, database_path=None):
+    def __init__(self, server_initial):
 
         """
         This limits strain on the database by restricting our attention to only
@@ -278,11 +264,9 @@ class MainDataCrawler:
         # Using the dictionaries above get the name space server Id and
         # server name of the server we wish to crawl.
         # Remember you can change these class variables if needed.
-        self.namespace = namespace_dict[server_inital]
-        self.server_id = server_id_dict[server_inital]
-        self.server_name = server_name_dict[server_inital]
-
-        build_database_tables(server_inital)
+        self.namespace = namespace_dict[server_initial]
+        self.server_id = server_id_dict[server_initial]
+        self.server_name = server_name_dict[server_initial]
 
         self.table_name = (
             self.server_name
@@ -299,33 +283,27 @@ class MainDataCrawler:
         # node while the values are the values of its friends.
         self.idDict = {}
 
-        # I have two computers and thus two paths to the Dropbox.
-        # You will want to replace self.mypath with whatever path
-        # you want to use for storing your data.
-        if database_path is None:
-            self.mypath = DATABASE_PATH
-        else:
-            self.mypath = database_path
-
         # The archive database saves the responses from the API so no API call
         # is ever done twice, this is new this version.
 
-        archive_path = os.path.join(self.mypath, "archive.db")
+        archive_path = os.path.join(DATABASE_PATH, "archive.db")
         logger.info(archive_path)
         self.archive = sqlite3.connect(archive_path)
 
         # This database stores the unpacked data in the format used later.
 
-        database_path = os.path.join(self.mypath, f"{self.server_name}.db")
+        database_path = os.path.join(DATABASE_PATH, f"{self.server_name}.db")
         self.database = sqlite3.connect(database_path)
+
+        build_database_tables(self.table_name, self.archive, self.database)
 
         # Get the starting nodes from the leader-boards.
         # If we already have seed nodes for the day simply retrieve them,
         # otherwise gather some.
-        existing_seeds = singleCol(self.archive, "SELECT name from seed_nodes")
+        existing_seeds = single_column(self.archive, "SELECT name from seed_nodes")
 
         if self.table_name in existing_seeds:
-            seed = singleCol(
+            seed = single_column(
                 self.archive,
                 f"SELECT seed_nodes from seed_nodes where name = \"{self.table_name}\"",
             )[0]
@@ -429,8 +407,8 @@ class MainDataCrawler:
         # Load existing values
         idDict = {}
         # All nodes we have a archived friends-list for already.
-        archive_id = singleCol(
-            self.archive, "Select Id from " + self.table_name + "Edge"
+        archive_id = single_column(
+            self.archive, "SELECT Id FROM " + self.table_name + "Edge"
         )
         # List of all nodes for which no archived value exists.
         remaining_nodes = [n for n in to_check if n not in archive_id]
@@ -445,7 +423,6 @@ class MainDataCrawler:
             results = fetch_friend_lists_for_characters(self.namespace, l, problem_character_ids)
             for raw_friendlist_record in results:
                 # First dump the raw results of the call into a table
-                print(raw_friendlist_record)
                 current_char_id = raw_friendlist_record["character_id"]
                 try:
                     serialized_record = json.dumps(raw_friendlist_record)
@@ -468,7 +445,15 @@ class MainDataCrawler:
             for f in results:
                 idDict[f["character_id"]] = f["friend_list"]
             self.archive.commit()
-            time.sleep(COOLDOWN)
+            time.sleep(COOL_DOWN)
+
+        # Record information on the ids that have been problematic
+        for problem_character_id in problem_character_ids:
+            self.archive.execute(
+                f"INSERT INTO {self.table_name}problem_character_ids (character_id) VALUES(?)",
+                (str(problem_character_id),))
+        self.archive.commit()
+
         # Load in the friends-list from any stored results we may already have
         archived_friends_lists = self.sql_columns_to_dicts("Edge", "raw", self.archive)
         for l in [i for i in to_check if i not in remaining_nodes]:
@@ -487,7 +472,7 @@ class MainDataCrawler:
 
     # Gathers all node attributes.
     def get_node_attributes(self):
-        edges = multiCol(
+        edges = multi_column(
             self.database,
             f"SELECT Source,Target FROM {self.table_name}Eset WHERE Status=\"normal\"",
         )
@@ -501,7 +486,7 @@ class MainDataCrawler:
         logger.debug(f'getCharData for {nodes}')
 
         # Gets character attributes for each found in the friend lists
-        archive_id = singleCol(
+        archive_id = single_column(
             self.archive, f"SELECT Id from {self.table_name}Node"
         )
         remaining_nodes = [n for n in nodes if n not in archive_id]
@@ -544,18 +529,18 @@ class MainDataCrawler:
             self.archive.commit()
             i = i + 40
             # 2 second wait seems to be enough to avoid hitting API soft limit
-            time.sleep(COOLDOWN)
+            time.sleep(COOL_DOWN)
 
     def interp_character_data(self):
         """Unpacks the character data gathered previously,
         reading the raw data from the archive and writing it into the database.
         """
-        completed_id = singleCol(
+        completed_id = single_column(
             self.database, "SELECT Id from " + self.table_name + "Node"
         )
         results = []
         get_unpacked = "SELECT Id,raw from {}Node".format(self.table_name)
-        for raw in multiCol(self.archive, get_unpacked):
+        for raw in multi_column(self.archive, get_unpacked):
             if raw[0] not in completed_id:
                 results.append(json.loads(raw[1]))
         # Unpack and add it to the snapshots.
@@ -675,7 +660,7 @@ class MainDataCrawler:
             "minutes_played",
             "last_login_date",
         ]
-        edge_raw = multiCol(
+        edge_raw = multi_column(
             self.database,
             f"SELECT * FROM {self.table_name}Eset where Status=\"normal\"",
         )
@@ -684,7 +669,7 @@ class MainDataCrawler:
             if edge[2] == "normal":
                 G.add_edge(edge[0], edge[1])
                 G[edge[0]][edge[1]]["status"] = edge[2]
-        archive_id = singleCol(
+        archive_id = single_column(
             self.archive, f"Select Id from {self.table_name}Node"
         )
         remaining_nodes = [n for n in G.nodes() if n not in archive_id]
@@ -723,7 +708,7 @@ class MainDataCrawler:
             table is either Node or Edge
         """
         d = {}
-        val = multiCol(
+        val = multi_column(
             connection,
             f"SELECT Id,{col_name} FROM {self.table_name}{table_type}"
         )
@@ -749,20 +734,20 @@ class MainDataCrawler:
         return outList
 
 
-def run_PS4(database_path=None):
+def run_PS4():
     # Crawl the playstation 4 servers.
     # Note that most of these servers have since been merged together.
     for initials in ["G", "Cr", "L", "S", "Ce", "P"]:
-        server_crawler = MainDataCrawler(initials, database_path)
+        server_crawler = MainDataCrawler(initials)
         logger.info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
 
 
-def run_PC(database_path=None):
+def run_PC():
     # Crawl the 3 PC servers.
     # for initials in ["E", "C", "M"]:
     for initials in ["C"]:
-        server_crawler = MainDataCrawler(initials, database_path)
+        server_crawler = MainDataCrawler(initials)
         logger.info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
 

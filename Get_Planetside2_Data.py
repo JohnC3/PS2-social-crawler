@@ -7,7 +7,7 @@ Read through everything carefully the structure is very odd.
 This code builds a graph of the frendslist of active characters in the MMO
 planetside 2 by using the census API.
 
-Information on the API is found here at http://census.soe.com/, you may request
+Information on the API is found here at http://census.daybreakgames.com/, you may request
 a Service ID of your own on the page they seem very
 
 The official limit on query's is no more than 100 in 1 minute, or you risk
@@ -35,11 +35,11 @@ logger.setLevel(logging.DEBUG)
 with open('local_config.json', 'r') as json_conf:
     config_dict = json.load(json_conf)
 SERVICE_ID = config_dict['service_id']
-DATABASE_PATH = config_dict['database_path']
+DATABASE_PATH = os.path.join(*config_dict['database_path'])
 RETRY_CAP = config_dict['retry_cap']
 COOLDOWN = 20.0
 MAX_INACTIVE_DAYS = 21
-FRIEND_BATCH_SIZE = 5
+FRIEND_BATCH_SIZE = 40
 
 
 def singleCol(conn, query):
@@ -146,35 +146,6 @@ def fetch_url(url):
     raise Exception(f"Unable to call fetch_url on url {url} see logs")
 
 
-create_edge_set_table = """
-    Create table if not exists {}Eset (
-        Source TEXT,
-        Target TEXT,
-        Status TEXT
-    )"""
-
-create_node_table = """
-    Create table if not exists {}Node (
-        Id PRIMARY KEY,
-        name TEXT,
-        faction TEXT,
-        br INTEGER,
-        outfitTag TEXT,
-        outfitId INTEGER,
-        outfitSize INTEGER,
-        creation_date INTEGER,
-        login_count INTEGER,
-        minutes_played INTEGER,
-        last_login_date INTEGER,
-        kills INTEGER,
-        deaths INTEGER
-    )"""
-
-history_schema = """Create table if not exists {}History (
-        Id PRIMARY KEY,
-        history TEXT
-    )"""
-
 stat_history_schema = """
     INSERT or replace INTO {}History (Id, history) VALUES(?, ?)
     """
@@ -189,7 +160,57 @@ char_data_schema = """
     """
 
 
-def fetch_friend_lists_for_characters(namespace, character_list: List[str]) -> Tuple[List[dict], list]:
+def build_database_tables(server_initial: str):
+    DT = datetime.datetime.now()
+    # Using the dictionaries above get the name space server Id and
+    # server name of the server we wish to crawl.
+    # Remember you can change these class variables if needed.
+    server_name = server_name_dict[server_initial]
+
+    table_name = server_name + DT.strftime("%B") + str(DT.day) + str(DT.year)
+
+    # The archive database saves the responses from the API so no API call
+    # is ever done twice, this is new this version.
+
+    archive_path = os.path.join(DATABASE_PATH, "archive.db")
+    logger.info(archive_path)
+    archive = sqlite3.connect(archive_path)
+
+    archive_setup_script = f"""
+    Create table if not exists {table_name}Edge (Id Primary key,raw TEXT);
+
+    Create table if not exists {table_name}Node (Id Primary key, raw TEXT);
+
+    -- The seed_node table records the set of seed nodes just in case it is
+    -- needed for debugging or some unforeseen purpose.
+    Create table if not exists seed_nodes (name TEXT, seed_nodes TEXT);
+    """
+
+    archive.executescript(archive_setup_script)
+
+    database_path = os.path.join(DATABASE_PATH, f"{server_name}.db")
+    database = sqlite3.connect(database_path)
+
+    # the data in two tables Eset and Node which have the format my code
+    # actually uses and a third table history stores stat history data in
+    # case I want to do something with that later.
+
+    # This database stores the unpacked data in the format used later.
+    output_setup_script = f"""
+    Create table if not exists {table_name}Eset (Source TEXT, Target TEXT, Status TEXT);
+
+    Create table if not exists {table_name}Node (Id PRIMARY KEY, name TEXT, faction TEXT, br INTEGER, 
+        outfitTag TEXT, outfitId INTEGER, outfitSize INTEGER, creation_date INTEGER, login_count INTEGER, 
+        minutes_played INTEGER, last_login_date INTEGER, kills INTEGER, deaths INTEGER);  
+
+    Create table if not exists {table_name}History (Id PRIMARY KEY, history TEXT);
+    """
+
+    database.executescript(output_setup_script)
+
+
+def fetch_friend_lists_for_characters(namespace, character_list: List[str], problematic_character_ids: List[int]
+                                      ) -> List[dict]:
     """
     Return the list of friend list responses from the server. Also return the list of character ids who couldn't be
     loaded due to errors!
@@ -205,7 +226,6 @@ def fetch_friend_lists_for_characters(namespace, character_list: List[str]) -> T
         character_ids = str(character_list[0])
 
     friend_list_results = []
-    problematic_character_ids = []
 
     url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/{namespace}/characters_friend/" \
           f"?character_id={character_ids}"
@@ -222,11 +242,15 @@ def fetch_friend_lists_for_characters(namespace, character_list: List[str]) -> T
             for indi_index, individual in enumerate(character_list):
                 logger.info(f"Attempting to run individual {indi_index} ({individual})")
 
-                individual_results = fetch_friend_lists_for_characters(namespace, [individual])
+                individual_results = fetch_friend_lists_for_characters(namespace, [individual],
+                                                                       problematic_character_ids)
                 if len(individual_results) > 0:
                     friend_list_results.extend(individual_results)
                 else:
                     logger.warning(f"Unable to fetch data for player {individual} for whatever reason")
+
+        elif len(character_list) == 1:
+            problematic_character_ids.append(character_list)
 
     except Exception as err:
 
@@ -236,7 +260,7 @@ def fetch_friend_lists_for_characters(namespace, character_list: List[str]) -> T
     return friend_list_results
 
 
-class main_data_crawler:
+class MainDataCrawler:
     """
     Contains all the methods settings etc needed to build the friend-list graph
     and fetch node attributes of a server in planetside2. The class takes the
@@ -258,6 +282,8 @@ class main_data_crawler:
         self.server_id = server_id_dict[server_inital]
         self.server_name = server_name_dict[server_inital]
 
+        build_database_tables(server_inital)
+
         self.table_name = (
             self.server_name
             + self.DT.strftime("%B")
@@ -277,7 +303,7 @@ class main_data_crawler:
         # You will want to replace self.mypath with whatever path
         # you want to use for storing your data.
         if database_path is None:
-            self.mypath = os.path.join(*DATABASE_PATH)
+            self.mypath = DATABASE_PATH
         else:
             self.mypath = database_path
 
@@ -288,31 +314,10 @@ class main_data_crawler:
         logger.info(archive_path)
         self.archive = sqlite3.connect(archive_path)
 
-        # Create the Edge and Node tables for raw data
-        self.archive.execute(
-            f"Create table if not exists {self.table_name}Edge (Id Primary key,raw TEXT)"
-        )
-        self.archive.execute(
-            f"Create table if not exists {self.table_name}Node (Id Primary key, raw TEXT)"
-        )
-
-        # The seed_node table records the set of seed nodes just in case it is
-        # needed for debugging or some unforeseen purpose.
-        self.archive.execute(
-            "Create table if not exists seed_nodes (name TEXT, seed_nodes TEXT)"
-        )
-
         # This database stores the unpacked data in the format used later.
 
         database_path = os.path.join(self.mypath, f"{self.server_name}.db")
         self.database = sqlite3.connect(database_path)
-
-        # the data in two tables Eset and Node which have the format my code
-        # actually uses and a third table history stores stat history data in
-        # case I want to do something with that later.
-        self.database.execute(create_edge_set_table.format(self.table_name))
-        self.database.execute(create_node_table.format(self.table_name))
-        self.database.execute(history_schema.format(self.table_name))
 
         # Get the starting nodes from the leader-boards.
         # If we already have seed nodes for the day simply retrieve them,
@@ -433,9 +438,11 @@ class main_data_crawler:
         batched_remaining_nodes = self.chunks(remaining_nodes, FRIEND_BATCH_SIZE)
         total_batches = len(batched_remaining_nodes)
 
+        problem_character_ids = []
+
         for batch_number, l in enumerate(batched_remaining_nodes):
             logger.info(f"[{batch_number} of {total_batches}]")
-            results = fetch_friend_lists_for_characters(self.namespace, l)
+            results = fetch_friend_lists_for_characters(self.namespace, l, problem_character_ids)
             for raw_friendlist_record in results:
                 # First dump the raw results of the call into a table
                 print(raw_friendlist_record)
@@ -746,7 +753,7 @@ def run_PS4(database_path=None):
     # Crawl the playstation 4 servers.
     # Note that most of these servers have since been merged together.
     for initials in ["G", "Cr", "L", "S", "Ce", "P"]:
-        server_crawler = main_data_crawler(initials, database_path)
+        server_crawler = MainDataCrawler(initials, database_path)
         logger.info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
 
@@ -755,7 +762,7 @@ def run_PC(database_path=None):
     # Crawl the 3 PC servers.
     # for initials in ["E", "C", "M"]:
     for initials in ["C"]:
-        server_crawler = main_data_crawler(initials, database_path)
+        server_crawler = MainDataCrawler(initials, database_path)
         logger.info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
 

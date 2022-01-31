@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 logging.basicConfig()
 logger.setLevel(logging.DEBUG)
 
+with open('local_config.json', 'r') as json_conf:
+    config_dict = json.load(json_conf)
+SERVICE_ID = config_dict['service_id']
+DATABASE_PATH = config_dict['database_path']
+RETRY_CAP = config_dict['retry_cap']
+
 
 def singleCol(conn, query):
     return [i[0] for i in conn.execute(query).fetchall()]
@@ -100,9 +106,12 @@ server_name_dict = {
 def fetch_url(url):
     # Fetch the data from url
     backoff = 1
-    while True:
+    retry_count = 0
+    while retry_count < RETRY_CAP:
         try:
             jsonObj = urllib.request.urlopen(url, timeout=30)
+            decoded = json.loads(jsonObj.read().decode("utf8"))
+            return decoded
 
         except Exception as e:
             notice_str = ('While requesting {} caught exception {}; retry after {}').format(url, e, backoff)
@@ -112,9 +121,8 @@ def fetch_url(url):
                 logger.info(notice_str)
             time.sleep(backoff)
             backoff *= 2
-
-    decoded = json.loads(jsonObj.read().decode("utf8"))
-    return decoded
+            retry_count += 1
+    raise Exception(f"Unable to call fetch_url on url {url} see logs")
 
 
 eset_schema = """
@@ -201,7 +209,7 @@ class main_data_crawler:
         # You will want to replace self.mypath with whatever path
         # you want to use for storing your data.
         if database_path is None:
-            self.mypath = os.path.join("D:", "Dropbox", "Dropbox", "Data2018")
+            self.mypath = os.path.join(DATABASE_PATH)
         else:
             self.mypath = database_path
 
@@ -356,11 +364,10 @@ class main_data_crawler:
         for l in self.chunks(remaining_nodes, 40):
 
             L = list(set(l))
-            url = (
-                "http://census.daybreakgames.com/s:GraphSearch/get/{namespace}/"
-                "characters_friend/?character_id={character_ids}&c:resolve=world"
-                "&c:show=character_id,world_id"
-            ).format(namespace=self.namespace, character_ids=",".join(L))
+            character_ids = ",".join(L)
+            url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/{self.namespace}/"\
+                  f"characters_friend/?character_id={character_ids}&c:resolve=world"\
+                  f"&c:show=character_id,world_id"
 
             logger.info(url)
             decoded = fetch_url(url)
@@ -432,10 +439,11 @@ class main_data_crawler:
             # After 5000 iterations print the progress %.
             if i % 5000 == 0:
                 logger.info(f"looking up data completion is at {i} ")
-            url = ("http://census.daybreakgames.com/s:GraphSearch/get/"
-                   "{namespace}/character/?character_id={character_ids}"
-                   "&c:resolve=outfit,name,stats,times,stat_history"
-                   ).format(namespace=self.namespace, character_ids=",".join(l))
+            character_ids = ",".join(l)
+            url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/" \
+                  f"{self.namespace}/character/?character_id={character_ids}" \
+                  f"&c:resolve=outfit,name,stats,times,stat_history"
+
             logger.debug(f'fetching {url}')
             decoded = fetch_url(url)
 
@@ -549,18 +557,18 @@ class main_data_crawler:
 
         seed_ids = []
         for leaderboard_type in ["Kills", "Time", "Deaths", "Score"]:
-            url = ("http://census.daybreakgames.com/s:GraphSearch/get/"
-                   "{namespace}/leaderboard/?name={leaderboard_type}"
-                   "&period=Forever&world={server}&c:limit={limit}"
-            ).format(namespace=self.namespace, leaderboard_type=leaderboard_type,
-            server=self.server_name, limit=limit)
+            url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/" \
+                  f"{self.namespace}/leaderboard/?name={leaderboard_type}" \
+                  f"&period=Forever&world={self.server_name}&c:limit={limit}"
+
             logger.info(url)
             decoded = fetch_url(url)
             try:
                 H = decoded["leaderboard_list"]
-            except Exception:
-                logger.info(decoded)
-                logger.info(url)
+            except Exception as err:
+                logger.error(decoded)
+                logger.error(url)
+                logger.error(f"Failed with {err}")
             for characters in H:
                 Id = characters.get("character_id")
                 if Id is not None:
@@ -660,7 +668,7 @@ class main_data_crawler:
         """Breaks a list into a list of length n list."""
         outList = []
         for i in range(0, len(alist), n):
-            outList.append(alist[i : i + n])
+            outList.append(alist[i: i + n])
         return outList
 
 
@@ -682,4 +690,4 @@ def run_PC(database_path=None):
 
 
 if __name__ == "__main__":
-    run_PC(".")
+    run_PC()

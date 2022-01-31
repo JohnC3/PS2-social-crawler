@@ -1,0 +1,5 @@
+{
+  "service_id": "Apply on census API website http://census.daybreakgames.com/ don't abuse the kindness of the company",
+  "database_path": ["Specify a path to where you would like your database to be created"],
+  "retry_cap": 5
+}

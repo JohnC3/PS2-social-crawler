@@ -23,6 +23,8 @@ import sys
 import urllib.request
 import time
 import datetime
+from typing import List, Dict, Tuple
+
 import networkx as nx
 
 
@@ -37,6 +39,7 @@ DATABASE_PATH = config_dict['database_path']
 RETRY_CAP = config_dict['retry_cap']
 COOLDOWN = 20.0
 MAX_INACTIVE_DAYS = 21
+FRIEND_BATCH_SIZE = 5
 
 
 def singleCol(conn, query):
@@ -105,18 +108,34 @@ server_name_dict = {
 }
 
 
+class GiveUpException(Exception):
+    """
+    Exceptions where we give up on a query immediately... TODO: Think of a better name
+    """
+
+
 def fetch_url(url):
     # Fetch the data from url
-    backoff = 1
+    backoff = 4
     retry_count = 0
     while retry_count < RETRY_CAP:
         try:
             jsonObj = urllib.request.urlopen(url, timeout=30)
             decoded = json.loads(jsonObj.read().decode("utf8"))
+            if 'errorCode' in decoded:
+                if len(decoded.keys()) == 1:
+                    logger.error(f"Sever returned an error {decoded} when running {url}")
+                else:
+                    logger.error(f"Sever partial error {decoded} when running {url}")
+                raise GiveUpException(f"GiveUpException: because {decoded}")
             return decoded
 
         except Exception as e:
-            notice_str = ('While requesting {} caught exception {}; retry after {}').format(url, e, backoff)
+            if 'WinError 10054' in str(e):
+                # The connection has been terminated, don't know why, but stop harassing the server about it.
+                raise GiveUpException(str(e))
+
+            notice_str = 'While requesting {} caught exception {}; retry after {}'.format(url, e, backoff)
             if backoff < 10:
                 logger.debug(notice_str)
             else:
@@ -127,14 +146,14 @@ def fetch_url(url):
     raise Exception(f"Unable to call fetch_url on url {url} see logs")
 
 
-eset_schema = """
+create_edge_set_table = """
     Create table if not exists {}Eset (
         Source TEXT,
         Target TEXT,
         Status TEXT
     )"""
 
-node_schema = """
+create_node_table = """
     Create table if not exists {}Node (
         Id PRIMARY KEY,
         name TEXT,
@@ -168,6 +187,53 @@ char_data_schema = """
         kills, deaths)
         Values(?,?,?,?,?,?,?,?,?,?,?,?,?)
     """
+
+
+def fetch_friend_lists_for_characters(namespace, character_list: List[str]) -> Tuple[List[dict], list]:
+    """
+    Return the list of friend list responses from the server. Also return the list of character ids who couldn't be
+    loaded due to errors!
+    """
+
+    logger.info(f"fetch_friend_lists_for_characters {character_list}")
+    # Attempt to build a url for this set of characters and handle errors encountered along the way.
+    unique_characters = list(set(character_list))
+
+    if len(character_list) > 1:
+        character_ids = ",".join(unique_characters)
+    else:
+        character_ids = str(character_list[0])
+
+    friend_list_results = []
+    problematic_character_ids = []
+
+    url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/{namespace}/characters_friend/" \
+          f"?character_id={character_ids}"
+    try:
+        decoded = fetch_url(url)
+        logger.debug(decoded)
+        friend_list_results = decoded["characters_friend_list"]
+
+    except GiveUpException as possible_overload_error:
+        # Some characters have errors when you load the friends list. unclear why.
+        if len(character_list) > 1:
+            logger.error(f"Unable to load large group of ids: {character_list}")
+            logger.error(str(possible_overload_error))
+            for indi_index, individual in enumerate(character_list):
+                logger.info(f"Attempting to run individual {indi_index} ({individual})")
+
+                individual_results = fetch_friend_lists_for_characters(namespace, [individual])
+                if len(individual_results) > 0:
+                    friend_list_results.extend(individual_results)
+                else:
+                    logger.warning(f"Unable to fetch data for player {individual} for whatever reason")
+
+    except Exception as err:
+
+        logger.error(f"Unable to fetch friendlist for {character_list} {err}"
+                     f"giving up and moving on")
+
+    return friend_list_results
 
 
 class main_data_crawler:
@@ -244,8 +310,8 @@ class main_data_crawler:
         # the data in two tables Eset and Node which have the format my code
         # actually uses and a third table history stores stat history data in
         # case I want to do something with that later.
-        self.database.execute(eset_schema.format(self.table_name))
-        self.database.execute(node_schema.format(self.table_name))
+        self.database.execute(create_edge_set_table.format(self.table_name))
+        self.database.execute(create_node_table.format(self.table_name))
         self.database.execute(history_schema.format(self.table_name))
 
         # Get the starting nodes from the leader-boards.
@@ -353,7 +419,7 @@ class main_data_crawler:
         Returns a dictionary where the keys are Ids and values are
         their friends lists
         """
-        logger.info("Gathering friendlists")
+        logger.info("Gathering friend lists")
         start_time = time.mktime(time.localtime())
         # Load existing values
         idDict = {}
@@ -364,38 +430,34 @@ class main_data_crawler:
         # List of all nodes for which no archived value exists.
         remaining_nodes = [n for n in to_check if n not in archive_id]
 
-        batched_remaining_nodes = self.chunks(remaining_nodes, 40)
+        batched_remaining_nodes = self.chunks(remaining_nodes, FRIEND_BATCH_SIZE)
         total_batches = len(batched_remaining_nodes)
 
         for batch_number, l in enumerate(batched_remaining_nodes):
-
-            L = list(set(l))
-            character_ids = ",".join(L)
-            url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/{self.namespace}/"\
-                  f"characters_friend/?character_id={character_ids}&c:resolve=world"\
-                  f"&c:show=character_id,world_id"
-
-            logger.info(f"[{batch_number} of {total_batches}] {url}")
-            decoded = fetch_url(url)
-            results = decoded["characters_friend_list"]
-            for x in results:
+            logger.info(f"[{batch_number} of {total_batches}]")
+            results = fetch_friend_lists_for_characters(self.namespace, l)
+            for raw_friendlist_record in results:
                 # First dump the raw results of the call into a table
+                print(raw_friendlist_record)
+                current_char_id = raw_friendlist_record["character_id"]
+                try:
+                    serialized_record = json.dumps(raw_friendlist_record)
+
+                except TypeError:
+                    logger.error("Unable to serialize raw_friendlist_record")
+                    logger.info(str(raw_friendlist_record))
+                    raise
+
                 try:
                     self.archive.execute(
                         f"INSERT OR REPLACE into {self.table_name}Edge (Id,raw) VALUES(?,?)",
-                        (x["character_id"], json.dumps(x)),
+                        (current_char_id, serialized_record),
                     )
+
                 except Exception:
-                    # Usually when/if this fails its because the server is down
-                    # TODO: Properly handle the exceptions as they happen. Separate the insertion exceptions from
-                    #  connection issues etc
                     logger.info("archive failure")
-                    logger.info("{} {}".format(x["character_id"], json.dumps(x)))
-                    if "error" in str(decoded):
-                        logger.info("Server down")
-                        exit
-                    else:
-                        raise
+                    logger.info(f"{current_char_id} {serialized_record}")
+                    raise
             for f in results:
                 idDict[f["character_id"]] = f["friend_list"]
             self.archive.commit()
@@ -424,10 +486,10 @@ class main_data_crawler:
         )
         G = nx.Graph()
         G.add_edges_from(edges)
-        self.getCharData(G.nodes())
+        self.get_character_data(G.nodes())
         self.interp_character_data()
 
-    def getCharData(self, nodes):
+    def get_character_data(self, nodes):
 
         logger.debug(f'getCharData for {nodes}')
 

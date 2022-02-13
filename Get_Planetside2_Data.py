@@ -147,10 +147,10 @@ def fetch_friend_lists_for_characters(namespace, character_list: List[str], prob
     friend_list_results = []
 
     url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/{namespace}/characters_friend/" \
-          f"?character_id={character_ids}"
+          f"?character_id={character_ids}&c:resolve=world"
+
     try:
         decoded = fetch_url(url)
-        fetch_logger().debug(decoded)
         friend_list_results = decoded["characters_friend_list"]
 
     except GiveUpException as possible_overload_error:
@@ -172,10 +172,7 @@ def fetch_friend_lists_for_characters(namespace, character_list: List[str], prob
             problematic_character_ids.append(character_list)
 
     except Exception as err:
-
-        fetch_logger().error(f"Unable to fetch friendlist for {character_list} {err}"
-                     f"giving up and moving on")
-
+        fetch_logger().error(f"Unable to fetch friendlist for {character_list} {err} giving up and moving on")
     return friend_list_results
 
 
@@ -277,6 +274,11 @@ class MainDataCrawler:
         normal: The rest
         """
         character_id = friend.get("character_id", -1)
+
+        if "world_id" not in friend:
+            fetch_logger().critical(f"{friend}")
+            return "Damaged"
+
         world_id = friend["world_id"]
         last_online = int(friend.get("last_login_time", -1))
 
@@ -296,10 +298,11 @@ class MainDataCrawler:
         Unpack a bunch of friend lists into the datatables. Returns a list of friends that should be checked
 
         """
+        tstart = time.time()
 
         insert_edge_query = f"""
         INSERT OR REPLACE INTO {self.table_name}_eset (Source, Target, Status) 
-            Values(?, ?, ?)
+            VALUES (?, ?, ?)
         """
 
         character_id_queue = set()
@@ -308,11 +311,12 @@ class MainDataCrawler:
         uncovered_friends = 0
         out_of_scope_friends = 0
 
+        args = []
+
         for character_id, friend_list in raw_friendlists.items():
             self.done.add(character_id)
             for friend in friend_list:
                 # It is at this point that "friend" starts to look like a fake word
-                pass
                 friend_id = friend.get("character_id", -1)
 
                 # If a friends_id is already inside of done we can assume its edge to the current character already
@@ -330,13 +334,14 @@ class MainDataCrawler:
                 else:
                     out_of_scope_friends += 1
 
-                # Inserts the information into the Eset.
-                self.database_connection.execute(insert_edge_query, (character_id, friend_id, status))
-                self.database_connection.commit()
+        cursor = self.database_connection.cursor()
+        cursor.executemany(insert_edge_query, args)
+        self.database_connection.commit()
 
         fetch_logger().info(f"Unpacked {len(raw_friendlists)} found {covered_friends} characters we already have in "
                             f"the database. {uncovered_friends} characters we need to query and {out_of_scope_friends} "
                             f"friends who are forbidden to this crawler")
+        fetch_logger().critical(f"Unpacking took {time.time()-tstart}")
         return list(character_id_queue)
 
     def get_friends(self, characters_to_query):
@@ -358,12 +363,9 @@ class MainDataCrawler:
         unarchived_character_ids = []
 
         for character_id in characters_to_query:
-            fetch_logger().info(f"{character_id}")
-            fetch_logger().info(f"{archived_friendlist_query}")
             archived_friendlist_results = self.archive_connection.execute(archived_friendlist_query,
                                                                           (str(character_id),)).fetchone()
-            fetch_logger().info(f"{archived_friendlist_results}")
-            if len(archived_friendlist_results) == 0:
+            if archived_friendlist_results is None:
                 unarchived_character_ids.append(character_id)
                 continue
             self.done.add(character_id)
@@ -411,6 +413,7 @@ class MainDataCrawler:
                 )
 
             self.archive_connection.commit()
+            fetch_logger().info(f"Waiting {COOL_DOWN}")
             time.sleep(COOL_DOWN)
 
         # Record information on the ids that have been problematic
@@ -736,3 +739,4 @@ if __name__ == "__main__":
     run_PC()
     # save_graph_to_graphml('Connery.db', 'Connery_February_13_2022')
 
+"http://census.daybreakgames.com/s:GraphSearchReborn/get/ps2:v2/characters_friend/?character_id=5429124457460275697,8259611662668060529"

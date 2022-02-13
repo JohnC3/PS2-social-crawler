@@ -10,41 +10,17 @@ a Service ID of your own on the page they seem very
 The official limit on query's is no more than 100 in 1 minute, or you risk
 having your connection terminated or being banned outright from the API.
 """
-
-
-import logging
 import sqlite3
 import json
 import os
-import sys
-import urllib.request
 import time
 import datetime
-from typing import List, Dict, Tuple
+from typing import List
 
 import networkx as nx
 
-
-logger = logging.getLogger(__name__)
-logging.basicConfig()
-logger.setLevel(logging.DEBUG)
-
-with open('local_config.json', 'r') as json_conf:
-    config_dict = json.load(json_conf)
-SERVICE_ID = config_dict['service_id']
-DATABASE_PATH = os.path.join(*config_dict['database_path'])
-RETRY_CAP = config_dict['retry_cap']
-COOL_DOWN = 5.0
-MAX_INACTIVE_DAYS = 21
-FRIEND_BATCH_SIZE = 40
-
-
-def single_column(conn, query):
-    return [i[0] for i in conn.execute(query).fetchall()]
-
-
-def multi_column(conn, query):
-    return [list(i) for i in conn.execute(query).fetchall()]
+from utils import single_column, multi_column, GiveUpException, fetch_url, logger, SERVICE_ID, DATABASE_PATH, COOL_DOWN, \
+    MAX_INACTIVE_DAYS, FRIEND_BATCH_SIZE
 
 
 """
@@ -104,55 +80,12 @@ server_name_dict = {
     "Cr": "Crux",
 }
 
-
-class GiveUpException(Exception):
-    """
-    Exceptions where we give up on a query immediately... TODO: Think of a better name
-    """
-
-
-def fetch_url(url):
-    # Fetch the data from url
-    backoff = 4
-    retry_count = 0
-    while retry_count < RETRY_CAP:
-        try:
-            jsonObj = urllib.request.urlopen(url, timeout=30)
-            decoded = json.loads(jsonObj.read().decode("utf8"))
-            if 'errorCode' in decoded:
-                if len(decoded.keys()) == 1:
-                    logger.error(f"Sever returned an error {decoded} when running {url}")
-                else:
-                    logger.error(f"Sever partial error {decoded} when running {url}")
-                raise GiveUpException(f"GiveUpException: because {decoded}")
-            return decoded
-
-        except GiveUpException as stop:
-            # Don't handle such exceptions
-            raise stop
-
-        except Exception as e:
-            if 'WinError 10054' in str(e):
-                # The connection has been terminated, don't know why, but stop harassing the server about it.
-                raise GiveUpException(str(e))
-
-            notice_str = 'While requesting {} caught exception {}; retry after {}'.format(url, e, backoff)
-            if backoff < 10:
-                logger.debug(notice_str)
-            else:
-                logger.info(notice_str)
-            time.sleep(backoff)
-            backoff *= 2
-            retry_count += 1
-    raise Exception(f"Unable to call fetch_url on url {url} see logs")
-
-
 stat_history_schema = """
-    INSERT or replace INTO {}History (Id, history) VALUES(?, ?)
+    INSERT or replace INTO {}_history (Id, history) VALUES(?, ?)
     """
 
 char_data_schema = """
-    INSERT or replace INTO {}Node (
+    INSERT or replace INTO {}_node (
         Id, name, faction, br,
         outfitTag, outfitId, outfitSize,
         creation_date, login_count, minutes_played, last_login_date,
@@ -164,9 +97,9 @@ char_data_schema = """
 def build_database_tables(table_name: str, archive_connection, output_connection):
 
     archive_setup_script = f"""
-    CREATE TABLE IF NOT EXISTS {table_name}Edge (Id Primary key,raw TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}_edge (Id Primary key,raw TEXT);
 
-    CREATE TABLE IF NOT EXISTS {table_name}Node (Id Primary key, raw TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}_node (Id Primary key, raw TEXT);
 
     -- The seed_node table records the set of seed nodes just in case it is
     -- needed for debugging or some unforeseen purpose.
@@ -181,15 +114,15 @@ def build_database_tables(table_name: str, archive_connection, output_connection
     # actually uses and a third table history stores stat history data in
     # case I want to do something with that later.
 
-    # This database stores the unpacked data in the format used later.
+    # This database_connection stores the unpacked data in the format used later.
     output_setup_script = f"""
-    CREATE TABLE IF NOT EXISTS {table_name}Eset (Source TEXT, Target TEXT, Status TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}_eset (Source TEXT, Target TEXT, Status TEXT);
 
-    CREATE TABLE IF NOT EXISTS {table_name}Node (Id PRIMARY KEY, name TEXT, faction TEXT, br INTEGER, 
+    CREATE TABLE IF NOT EXISTS {table_name}_node (Id PRIMARY KEY, name TEXT, faction TEXT, br INTEGER, 
         outfitTag TEXT, outfitId INTEGER, outfitSize INTEGER, creation_date INTEGER, login_count INTEGER, 
         minutes_played INTEGER, last_login_date INTEGER, kills INTEGER, deaths INTEGER);  
 
-    CREATE TABLE IF NOT EXISTS {table_name}History (Id PRIMARY KEY, history TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}_history (Id PRIMARY KEY, history TEXT);
     """
 
     output_connection.executescript(output_setup_script)
@@ -256,11 +189,11 @@ class MainDataCrawler:
     def __init__(self, server_initial):
 
         """
-        This limits strain on the database by restricting our attention to only
-        those nodes active in last 44.25 days."""
-        self.curTime = time.mktime(time.localtime())
-        self.DT = datetime.datetime.now()
-        self.tSinceLogin = self.curTime - MAX_INACTIVE_DAYS * 24 * 3600
+        This limits strain on the database_connection by restricting our attention to only
+        those nodes active in last MAX_INACTIVE_DAYS days."""
+        self.current_time = time.mktime(time.localtime())
+        current_datetime = datetime.datetime.now()
+        self.tSinceLogin = self.current_time - MAX_INACTIVE_DAYS * 24 * 3600
         # Using the dictionaries above get the name space server Id and
         # server name of the server we wish to crawl.
         # Remember you can change these class variables if needed.
@@ -268,47 +201,44 @@ class MainDataCrawler:
         self.server_id = server_id_dict[server_initial]
         self.server_name = server_name_dict[server_initial]
 
-        self.table_name = (
-            self.server_name
-            + self.DT.strftime("%B")
-            + str(self.DT.day)
-            + str(self.DT.year)
-        )
+        self.table_name = f'{self.server_name}_{current_datetime.strftime("%B_%d_%Y")}'
 
         # The set done contains every node we have already examined
         # including those rejected as too old or otherwise invalid.
         self.done = set()
 
-        # idDict stores the data we have collected the key is the Id of the
+        # player_friendlist_dict stores the data we have collected the key is the Id of the
         # node while the values are the values of its friends.
-        self.idDict = {}
+        self.player_friendlist_dict = {}
 
-        # The archive database saves the responses from the API so no API call
+        # The archive_connection database_connection saves the responses from the API so no API call
         # is ever done twice, this is new this version.
 
         archive_path = os.path.join(DATABASE_PATH, "archive.db")
         logger.info(archive_path)
-        self.archive = sqlite3.connect(archive_path)
+        self.archive_connection = sqlite3.connect(archive_path)
 
-        # This database stores the unpacked data in the format used later.
+        # This database_connection stores the unpacked data in the format used later.
 
         database_path = os.path.join(DATABASE_PATH, f"{self.server_name}.db")
-        self.database = sqlite3.connect(database_path)
+        self.database_connection = sqlite3.connect(database_path)
 
-        build_database_tables(self.table_name, self.archive, self.database)
+        build_database_tables(self.table_name, self.archive_connection, self.database_connection)
 
         # Get the starting nodes from the leader-boards.
         # If we already have seed nodes for the day simply retrieve them,
         # otherwise gather some.
-        existing_seeds = single_column(self.archive, "SELECT name from seed_nodes")
+        existing_seeds = single_column(self.archive_connection, "SELECT name from seed_nodes")
 
         if self.table_name in existing_seeds:
+            logger.info("We already have fresh player ids for this server from today loading them")
             seed = single_column(
-                self.archive,
+                self.archive_connection,
                 f"SELECT seed_nodes from seed_nodes where name = \"{self.table_name}\"",
             )[0]
             self.listToCheck = seed.split(",")
         else:
+            logger.info("Picking fresh player ids from server leaderboard")
             self.listToCheck = self.leader_board_sample(75)
 
     # Gathers edges then gathers information on the nodes.
@@ -353,18 +283,18 @@ class MainDataCrawler:
         return "error"
 
     # Updates the list of nodes to Check and manages what nodes to ask the API
-    # about, also saves data to the SQL database.
+    # about, also saves data to the SQL database_connection.
     def expand_graph(self):
         Queue = set()
         Check = set()
         # Get the list of nodes we have server responses for.
-        valid = list(self.idDict.keys())
+        valid = list(self.player_friendlist_dict.keys())
         for i in self.listToCheck:
             # If i is in the id_dict we unpack its friends-list and go through
             # each of its friends to determine if we traverse them as well.
             # Other wise we add it to the Queue.
             if i in valid:
-                friend_list = self.idDict[i]
+                friend_list = self.player_friendlist_dict[i]
                 self.done.add(i)
                 for friend in friend_list:
 
@@ -378,8 +308,8 @@ class MainDataCrawler:
                             Queue.add(Id)
 
                         # Inserts the information into the Eset.
-                        self.database.execute(
-                            f"INSERT OR REPLACE INTO {self.table_name}Eset "
+                        self.database_connection.execute(
+                            f"INSERT OR REPLACE INTO {self.table_name}_eset "
                             "(Source,Target,Status) Values(?,?,?)",
                             (i, Id, status),
                         )
@@ -392,10 +322,10 @@ class MainDataCrawler:
         logger.info("Query len %s" % len(Check))
         # If there are nodes in check, fetch repeat.
         if len(Check) > 0:
-            self.idDict = self.get_friends(Check)
+            self.player_friendlist_dict = self.get_friends(Check)
         # Then add those nodes to the list of nodes to check.
         self.listToCheck = Queue
-        self.database.commit()
+        self.database_connection.commit()
 
     def get_friends(self, to_check):
         """
@@ -408,7 +338,7 @@ class MainDataCrawler:
         idDict = {}
         # All nodes we have a archived friends-list for already.
         archive_id = single_column(
-            self.archive, "SELECT Id FROM " + self.table_name + "Edge"
+            self.archive_connection, "SELECT Id FROM " + self.table_name + "Edge"
         )
         # List of all nodes for which no archived value exists.
         remaining_nodes = [n for n in to_check if n not in archive_id]
@@ -416,11 +346,11 @@ class MainDataCrawler:
         batched_remaining_nodes = self.chunks(remaining_nodes, FRIEND_BATCH_SIZE)
         total_batches = len(batched_remaining_nodes)
 
-        problem_character_ids = []
+        problematic_character_ids = []
 
         for batch_number, l in enumerate(batched_remaining_nodes):
             logger.info(f"[{batch_number} of {total_batches}]")
-            results = fetch_friend_lists_for_characters(self.namespace, l, problem_character_ids)
+            results = fetch_friend_lists_for_characters(self.namespace, l, problematic_character_ids)
             for raw_friendlist_record in results:
                 # First dump the raw results of the call into a table
                 current_char_id = raw_friendlist_record["character_id"]
@@ -429,33 +359,49 @@ class MainDataCrawler:
 
                 except TypeError:
                     logger.error("Unable to serialize raw_friendlist_record")
-                    logger.info(str(raw_friendlist_record))
+                    logger.error(str(raw_friendlist_record)[:100])
                     raise
 
                 try:
-                    self.archive.execute(
-                        f"INSERT OR REPLACE into {self.table_name}Edge (Id,raw) VALUES(?,?)",
+                    self.archive_connection.execute(
+                        f"INSERT OR REPLACE into {self.table_name}_edge (Id, raw) VALUES(?, ?)",
                         (current_char_id, serialized_record),
                     )
 
                 except Exception:
-                    logger.info("archive failure")
-                    logger.info(f"{current_char_id} {serialized_record}")
+                    logger.error("archive_connection failure")
+                    # logger.info(f"{current_char_id} {serialized_record}")
                     raise
             for f in results:
                 idDict[f["character_id"]] = f["friend_list"]
-            self.archive.commit()
+
+            for problem in problematic_character_ids:
+
+                problem_id = problem[0]
+                # raise Exception(f"{problem_id}")
+
+                problem_report = {'character_id': problem_id}
+                serialized_record = json.dumps(problem_report)
+
+                idDict[problem_id] = {}
+
+                self.archive_connection.execute(
+                    f"INSERT OR REPLACE into {self.table_name}_edge (Id, raw) VALUES(?, ?)",
+                    (problem_id, serialized_record),
+                )
+
+            self.archive_connection.commit()
             time.sleep(COOL_DOWN)
 
         # Record information on the ids that have been problematic
-        for problem_character_id in problem_character_ids:
-            self.archive.execute(
+        for problem_character_id in problematic_character_ids:
+            self.archive_connection.execute(
                 f"INSERT INTO {self.table_name}problem_character_ids (character_id) VALUES(?)",
                 (str(problem_character_id),))
-        self.archive.commit()
+        self.archive_connection.commit()
 
         # Load in the friends-list from any stored results we may already have
-        archived_friends_lists = self.sql_columns_to_dicts("Edge", "raw", self.archive)
+        archived_friends_lists = self.sql_columns_to_dicts("Edge", "raw", self.archive_connection)
         for l in [i for i in to_check if i not in remaining_nodes]:
             f = json.loads(archived_friends_lists[l])
             try:
@@ -473,8 +419,8 @@ class MainDataCrawler:
     # Gathers all node attributes.
     def get_node_attributes(self):
         edges = multi_column(
-            self.database,
-            f"SELECT Source,Target FROM {self.table_name}Eset WHERE Status=\"normal\"",
+            self.database_connection,
+            f"SELECT Source,Target FROM {self.table_name}_eset WHERE Status=\"normal\"",
         )
         G = nx.Graph()
         G.add_edges_from(edges)
@@ -487,7 +433,7 @@ class MainDataCrawler:
 
         # Gets character attributes for each found in the friend lists
         archive_id = single_column(
-            self.archive, f"SELECT Id from {self.table_name}Node"
+            self.archive_connection, f"SELECT Id from {self.table_name}_node"
         )
         remaining_nodes = [n for n in nodes if n not in archive_id]
         re_count = len(remaining_nodes)
@@ -513,34 +459,34 @@ class MainDataCrawler:
 
             results = decoded["character_list"]
             for x in results:
-                # Unpack the server response and add each to the archive.
+                # Unpack the server response and add each to the archive_connection.
                 try:
-                    self.archive.execute(
-                        f"INSERT OR REPLACE into {self.table_name}Node (Id,raw) VALUES(?,?)",
+                    self.archive_connection.execute(
+                        f"INSERT OR REPLACE into {self.table_name}_node (Id,raw) VALUES(?,?)",
                         (x["character_id"], json.dumps(x)),
                     )
                 except Exception:
-                    logger.info("archive failure")
+                    logger.info("archive_connection failure")
                     if "error" in str(decoded):
                         logger.info("Server down")
                         exit
                     else:
                         raise
-            self.archive.commit()
+            self.archive_connection.commit()
             i = i + 40
             # 2 second wait seems to be enough to avoid hitting API soft limit
             time.sleep(COOL_DOWN)
 
     def interp_character_data(self):
         """Unpacks the character data gathered previously,
-        reading the raw data from the archive and writing it into the database.
+        reading the raw data from the archive_connection and writing it into the database_connection.
         """
         completed_id = single_column(
-            self.database, "SELECT Id from " + self.table_name + "Node"
+            self.database_connection, "SELECT Id from " + self.table_name + "Node"
         )
         results = []
-        get_unpacked = "SELECT Id,raw from {}Node".format(self.table_name)
-        for raw in multi_column(self.archive, get_unpacked):
+        get_unpacked = "SELECT Id,raw from {}_node".format(self.table_name)
+        for raw in multi_column(self.archive_connection, get_unpacked):
             if raw[0] not in completed_id:
                 results.append(json.loads(raw[1]))
         # Unpack and add it to the snapshots.
@@ -582,11 +528,11 @@ class MainDataCrawler:
                 deaths = kill_stats[0].get("all_time", -1)
             else:
                 kills, deaths = -1, -1
-            self.database.execute(
+            self.database_connection.execute(
                 stat_history_schema.format(self.table_name), (Id, json.dumps(stats))
             )
 
-            self.database.execute(
+            self.database_connection.execute(
                 char_data_schema.format(self.table_name),
                 (
                     Id,
@@ -605,7 +551,7 @@ class MainDataCrawler:
                 ),
             )
 
-        self.database.commit()
+        self.database_connection.commit()
 
     def leader_board_sample(self, limit=50):
         """
@@ -628,7 +574,8 @@ class MainDataCrawler:
             try:
                 H = decoded["leaderboard_list"]
             except Exception as err:
-                logger.error(decoded)
+                #
+                # logger.error(decoded)
                 logger.error(url)
                 logger.error(f"Failed with {err}")
             for characters in H:
@@ -639,8 +586,8 @@ class MainDataCrawler:
         # Record the starting nodes for debugging. The busy_timeout prevents
         # a issue where sqlite3 was not waiting long enough.
         # It probably isn't needed but....
-        self.archive.execute("PRAGMA busy_timeout = 30000")
-        self.archive.execute(
+        self.archive_connection.execute("PRAGMA busy_timeout = 30000")
+        self.archive_connection.execute(
             "INSERT INTO seed_nodes (name,seed_nodes) VALUES(?,?)",
             (self.table_name, ",".join(unique)),
         )
@@ -660,34 +607,34 @@ class MainDataCrawler:
             "minutes_played",
             "last_login_date",
         ]
-        edge_raw = multi_column(
-            self.database,
-            f"SELECT * FROM {self.table_name}Eset where Status=\"normal\"",
-        )
-        G = nx.Graph()
+
+        edge_raw = multi_column(self.database_connection, f'SELECT * FROM {self.table_name}_eset where Status="normal"')
+        
+        graph = nx.Graph()
         for edge in edge_raw:
             if edge[2] == "normal":
-                G.add_edge(edge[0], edge[1])
-                G[edge[0]][edge[1]]["status"] = edge[2]
+                graph.add_edge(edge[0], edge[1])
+                graph[edge[0]][edge[1]]["status"] = edge[2]
+        
         archive_id = single_column(
-            self.archive, f"Select Id from {self.table_name}Node"
+            self.archive_connection, f"Select Id from {self.table_name}_node"
         )
-        remaining_nodes = [n for n in G.nodes() if n not in archive_id]
+        remaining_nodes = [n for n in graph.nodes() if n not in archive_id]
         logger.info(remaining_nodes)
         logger.info("deleted for being problems")
-        G.remove_nodes_from(remaining_nodes)
+        graph.remove_nodes_from(remaining_nodes)
         for attr in graphml_attrs:
             try:
-                G = self.my_set_thing(
-                    G, attr, self.sql_columns_to_dicts("Node", attr, self.database)
+                graph = self.my_set_thing(
+                    graph, attr, self.sql_columns_to_dicts("Node", attr, self.database_connection)
                 )
             except Exception:
                 logger.info("failure on %s" % attr)
                 raise
         graphml_path = os.path.join("C:", f"{self.table_name}test.graphml")
-        nx.write_graphml(G, graphml_path)
+        nx.write_graphml(graph, graphml_path)
 
-        return G
+        return graph
 
     def my_set_thing(self, G, attri_name, a_dict):
         """
@@ -718,13 +665,13 @@ class MainDataCrawler:
 
     def clear_results(self):
         """
-        Erase the tables in the database created by this class.
+        Erase the tables in the database_connection created by this class.
         In theory there is no situation where we would need to remove archived
         values.
         """
-        self.database.execute(f"DROP TABLE {self.table_name}Eset")
-        self.database.execute(f"DROP TABLE {self.table_name}Node")
-        self.database.execute(f"DROP TABLE {self.table_name}History")
+        self.database_connection.execute(f"DROP TABLE {self.table_name}_eset")
+        self.database_connection.execute(f"DROP TABLE {self.table_name}_node")
+        self.database_connection.execute(f"DROP TABLE {self.table_name}_history")
 
     def chunks(self, alist, n):
         """Breaks a list into a list of length n list."""

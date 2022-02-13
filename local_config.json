@@ -1,5 +1,9 @@
 {
   "service_id": "Apply on census API website http://census.daybreakgames.com/ don't abuse the kindness of the company",
   "database_path": ["Specify a path to where you would like your database to be created"],
-  "retry_cap": 5
+  "retry_cap": 5,
+  "friend_batch_size": 40,
+  "cool_down": 5.0,
+  "max_inactive_days": 21
+}
 }

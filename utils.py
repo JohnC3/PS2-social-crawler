@@ -14,6 +14,7 @@ RETRY_CAP = config_dict['retry_cap']
 COOL_DOWN = config_dict['cool_down']
 MAX_INACTIVE_DAYS = config_dict['max_inactive_days']
 FRIEND_BATCH_SIZE = config_dict['friend_batch_size']
+CHARACTER_INFO_BATCH_SIZE = config_dict['character_info_batch_size']
 
 
 def setup_logger(level: str, log_file_name: str, server: str) -> None:
@@ -79,6 +80,9 @@ def fetch_url(url: str) -> dict:
                 else:
                     fetch_logger().error(f"Sever partial error {decoded} when running {url}")
                 raise GiveUpException(f"GiveUpException: because {decoded}")
+            # COOL_DOWN second wait seems to be enough to avoid hitting API soft limit
+            fetch_logger().info(f"Waiting {COOL_DOWN}")
+            time.sleep(COOL_DOWN)
             return decoded
 
         except GiveUpException as stop:

@@ -20,8 +20,8 @@ from typing import List
 
 import networkx as nx
 
-from utils import single_column, multi_column, GiveUpException, fetch_url, SERVICE_ID, DATABASE_PATH, COOL_DOWN, \
-    MAX_INACTIVE_DAYS, FRIEND_BATCH_SIZE, fetch_logger, setup_logger, chunks
+from utils import single_column, multi_column, GiveUpException, fetch_url, SERVICE_ID, DATABASE_PATH, \
+    MAX_INACTIVE_DAYS, FRIEND_BATCH_SIZE, fetch_logger, setup_logger, chunks, CHARACTER_INFO_BATCH_SIZE
 
 """
 The Playstation 4 has 2 separate name spaces one for Europe and one for
@@ -103,7 +103,10 @@ def build_database_tables(table_name: str, archive_connection, output_connection
 
     # This database_connection stores the unpacked data in the format used later.
     output_setup_script = f"""
-    CREATE TABLE IF NOT EXISTS {table_name}_eset (Source TEXT, Target TEXT, Status TEXT);
+    CREATE TABLE IF NOT EXISTS {table_name}_character_info (character_id PRIMARY KEY, last_login_date INTEGER);
+    
+    CREATE TABLE IF NOT EXISTS {table_name}_eset (
+        Source TEXT, Target TEXT REFERENCES {table_name}_character_info (character_id), Status TEXT);
 
     CREATE TABLE IF NOT EXISTS {table_name}_node (character_id PRIMARY KEY, name TEXT, faction TEXT, br INTEGER, 
         outfitTag TEXT, outfitId INTEGER, outfitSize INTEGER, creation_date INTEGER, login_count INTEGER, 
@@ -283,7 +286,6 @@ class MainDataCrawler:
                 return "old"
             return "both"
 
-
     def unpack_friendlists(self, raw_friendlists: dict) -> list:
         """
         Unpack a bunch of friend lists into the datatables. Returns a list of friends that should be checked
@@ -292,9 +294,17 @@ class MainDataCrawler:
         tstart = time.time()
 
         insert_edge_query = f"""
-        INSERT OR REPLACE INTO {self.table_name}_eset (Source, Target, Status) 
+        INSERT OR IGNORE INTO {self.table_name}_eset (Source, Target, Status) 
             VALUES (?, ?, ?)
         """
+        edge_set_args = []
+
+        character_info_query = f"""
+        INSERT OR IGNORE INTO {self.table_name}_character_info (character_id, last_login_date)
+            VALUES (?, ?)
+        
+        """
+        character_info_args = []
 
         character_id_queue = set()
 
@@ -302,7 +312,6 @@ class MainDataCrawler:
         uncovered_friends = 0
         out_of_scope_friends = 0
 
-        args = []
 
         for character_id, friend_list in raw_friendlists.items():
             self.done.add(character_id)
@@ -324,9 +333,12 @@ class MainDataCrawler:
                     uncovered_friends += 1
                 else:
                     out_of_scope_friends += 1
+                character_info_args.append((character_id, friend.get("last_login_time", 0)))
+                edge_set_args.append((character_id, friend_id, status))
 
         cursor = self.database_connection.cursor()
-        cursor.executemany(insert_edge_query, args)
+        cursor.executemany(character_info_query, character_info_args)
+        cursor.executemany(insert_edge_query, edge_set_args)
         self.database_connection.commit()
 
         fetch_logger().info(f"Unpacked {len(raw_friendlists)} found {covered_friends} characters we already have in "
@@ -404,8 +416,6 @@ class MainDataCrawler:
                 )
 
             self.archive_connection.commit()
-            fetch_logger().info(f"Waiting {COOL_DOWN}")
-            time.sleep(COOL_DOWN)
 
         # Record information on the ids that have been problematic
         for problem_character_id in problematic_character_ids:
@@ -422,14 +432,17 @@ class MainDataCrawler:
             self.database_connection,
             f"SELECT Source, Target FROM {self.table_name}_eset WHERE Status=\"normal\"",
         )
-        G = nx.Graph()
-        G.add_edges_from(edges)
-        self.get_character_data(G)
-        self.interp_character_data()
+        graph = nx.Graph()
+        graph.add_edges_from(edges)
+        self.archive_character_data(graph)
+        self.interpret_character_data()
 
-    def get_character_data(self, graph):
+    def archive_character_data(self, graph):
+        """
+        Fetch data for the nodes in the graph. Only including those which are online.
+
+        """
         nodes = graph.nodes()
-        fetch_logger().debug(f'getCharData for {nodes}')
 
         # Gets character attributes for each found in the friend lists
         archive_id = single_column(
@@ -441,12 +454,11 @@ class MainDataCrawler:
             f"Number of nodes in graph is: {len(nodes)} Number of unarchived nodes is: {re_count}"
         )
         # Break the list up into chunks of 40
-        smallLists = chunks(remaining_nodes, 40)
-        i = 0
+        smallLists = chunks(remaining_nodes, CHARACTER_INFO_BATCH_SIZE)
+
+        completed_jobs = 0
         for character_id_batch in smallLists:
-            # After 5000 iterations print the progress %.
-            if i % 5000 == 0:
-                fetch_logger().info(f"looking up data completion is at {i} ")
+
             character_ids = ",".join(character_id_batch)
             url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/" \
                   f"{self.namespace}/character/?character_id={character_ids}" \
@@ -454,8 +466,6 @@ class MainDataCrawler:
 
             fetch_logger().debug(f'fetching {url}')
             decoded = fetch_url(url)
-
-            fetch_logger().debug(f'{decoded}')
 
             results = decoded["character_list"]
             for result in results:
@@ -473,12 +483,12 @@ class MainDataCrawler:
                     else:
                         raise
             self.archive_connection.commit()
-            i = i + 40
-            # COOL_DOWN second wait seems to be enough to avoid hitting API soft limit
-            time.sleep(COOL_DOWN)
+            completed_jobs += len(character_id_batch)
+            fetch_logger().info(f"looking up data completion is at {(completed_jobs / re_count) * 100.0} percent")
 
-    def interp_character_data(self):
-        """Unpacks the character data gathered previously,
+    def interpret_character_data(self):
+        """
+        Unpacks the character data gathered previously,
         reading the raw data from the archive_connection and writing it into the database_connection.
         """
         completed_id = single_column(
@@ -625,12 +635,16 @@ class MainDataCrawler:
         In theory there is no situation where we would need to remove archived
         values.
         """
-        self.database_connection.execute(f"DROP TABLE IF EXISTS {self.table_name}_eset")
-        self.database_connection.execute(f"DROP TABLE IF EXISTS {self.table_name}_node")
-        self.database_connection.execute(f"DROP TABLE IF EXISTS {self.table_name}_history")
+        database_table_names = [
+            f"{self.table_name}_character_info", f"{self.table_name}_eset",
+            f"{self.table_name}_node", f"{self.table_name}_history",
+        ]
+        for name in database_table_names:
+            self.database_connection.execute(f"DROP TABLE IF EXISTS {name}")
 
-        archive_table_names = [f"{self.table_name}_edge", f"{self.table_name}_node",
-                               f"seed_nodes", f"{self.table_name}_problem_character_ids"]
+        archive_table_names = [
+            f"{self.table_name}_edge", f"{self.table_name}_node",
+            f"seed_nodes", f"{self.table_name}_problem_character_ids"]
 
         for name in archive_table_names:
             self.archive_connection.execute(f"DROP TABLE IF EXISTS {name}")
@@ -653,11 +667,12 @@ def run_PC():
 
     argument_parser.add_argument('--target_initials', type=str, nargs='+', default=["E", "C", "M"])
     argument_parser.add_argument('--restart', action='store_true', help='Delete existing data and restart')
+    argument_parser.add_argument('--name_overwrite', default=None)
 
     parser_options = argument_parser.parse_args()
 
     for initials in parser_options.target_initials:
-        server_crawler = MainDataCrawler(initials, parser_options.restart, name_overwrite='February_13_2022')
+        server_crawler = MainDataCrawler(initials, parser_options.restart, parser_options.name_overwrite)
 
         fetch_logger().info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
@@ -736,10 +751,7 @@ def save_graph_to_graphml(database_name: str, source_table_name: str) -> None:
 
     return graph
 
+
 if __name__ == "__main__":
-
-
-
-
     run_PC()
     # save_graph_to_graphml('Connery.db', 'Connery_February_13_2022')

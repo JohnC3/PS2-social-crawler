@@ -80,19 +80,6 @@ server_name_dict = {
     "Cr": "Crux",
 }
 
-stat_history_schema = """
-    INSERT or replace INTO {}_history (Id, history) VALUES(?, ?)
-    """
-
-char_data_schema = """
-    INSERT or replace INTO {}_node (
-        Id, name, faction, br,
-        outfitTag, outfitId, outfitSize,
-        creation_date, login_count, minutes_played, last_login_date,
-        kills, deaths)
-        Values(?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """
-
 
 def build_database_tables(table_name: str, archive_connection, output_connection):
 
@@ -183,7 +170,7 @@ class MainDataCrawler:
     initial of the server to make a graph of when it is first called.
     """
 
-    def __init__(self, server_initial: str, restart: bool) -> None:
+    def __init__(self, server_initial: str, restart: bool, name_overwrite: str = None) -> None:
 
         """
         This limits strain on the database_connection by restricting our attention to only
@@ -199,6 +186,10 @@ class MainDataCrawler:
         self.server_name = server_name_dict[server_initial]
 
         self.table_name = f'{self.server_name}_{current_datetime.strftime("%B_%d_%Y")}'
+
+        if name_overwrite is not None:
+            self.table_name = f'{self.server_name}_{name_overwrite}'
+
 
         setup_logger('DEBUG', self.table_name, self.server_name)
 
@@ -429,15 +420,15 @@ class MainDataCrawler:
     def get_node_attributes(self):
         edges = multi_column(
             self.database_connection,
-            f"SELECT Source,Target FROM {self.table_name}_eset WHERE Status=\"normal\"",
+            f"SELECT Source, Target FROM {self.table_name}_eset WHERE Status=\"normal\"",
         )
         G = nx.Graph()
         G.add_edges_from(edges)
-        self.get_character_data(G.nodes())
+        self.get_character_data(G)
         self.interp_character_data()
 
-    def get_character_data(self, nodes):
-
+    def get_character_data(self, graph):
+        nodes = graph.nodes()
         fetch_logger().debug(f'getCharData for {nodes}')
 
         # Gets character attributes for each found in the friend lists
@@ -537,12 +528,26 @@ class MainDataCrawler:
                 deaths = kill_stats[0].get("all_time", -1)
             else:
                 kills, deaths = -1, -1
-            self.database_connection.execute(
-                stat_history_schema.format(self.table_name), (Id, json.dumps(stats))
-            )
+
+            stat_history_schema = f"""
+                INSERT or replace INTO {self.table_name}_history (character_id, history) VALUES(?, ?)
+            """
 
             self.database_connection.execute(
-                char_data_schema.format(self.table_name),
+                stat_history_schema, (character_id, json.dumps(stats))
+            )
+
+            char_data_schema = f"""
+                INSERT or replace INTO {self.table_name}_node (
+                    character_id, name, faction, br,
+                    outfitTag, outfitId, outfitSize,
+                    creation_date, login_count, minutes_played, last_login_date,
+                    kills, deaths)
+                    Values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """
+
+            self.database_connection.execute(
+                char_data_schema,
                 (
                     character_id,
                     name,
@@ -652,7 +657,7 @@ def run_PC():
     parser_options = argument_parser.parse_args()
 
     for initials in parser_options.target_initials:
-        server_crawler = MainDataCrawler(initials, parser_options.restart)
+        server_crawler = MainDataCrawler(initials, parser_options.restart, name_overwrite='February_13_2022')
 
         fetch_logger().info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
@@ -681,7 +686,7 @@ def my_set_thing(graph, attribute_name, a_dict):
     always throws errors if the dict is missing any values in the graph."""
 
     for node_id in graph.nodes():
-        graph.node[node_id][attribute_name] = a_dict[node_id]
+        graph.nodes[node_id][attribute_name] = a_dict[node_id]
     return graph
 
 
@@ -738,5 +743,3 @@ if __name__ == "__main__":
 
     run_PC()
     # save_graph_to_graphml('Connery.db', 'Connery_February_13_2022')
-
-"http://census.daybreakgames.com/s:GraphSearchReborn/get/ps2:v2/characters_friend/?character_id=5429124457460275697,8259611662668060529"

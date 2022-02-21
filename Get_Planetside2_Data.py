@@ -193,7 +193,6 @@ class MainDataCrawler:
         if name_overwrite is not None:
             self.table_name = f'{self.server_name}_{name_overwrite}'
 
-
         setup_logger('DEBUG', self.table_name, self.server_name)
 
         # The set done contains every node we have already examined
@@ -242,14 +241,14 @@ class MainDataCrawler:
                 self.archive_connection,
                 f'SELECT seed_nodes from seed_nodes where name = "{self.table_name}"',
             )[0]
-            initial_character_ids = seed.split(",")
+            self.initial_character_ids = seed.split(",")
         else:
             fetch_logger().info("Picking fresh player ids from server leaderboard")
-            initial_character_ids = self.leader_board_sample(10)
+            self.initial_character_ids = self.leader_board_sample(10)
 
         # Get raw responses from the server for the nodes we got from the
         # leader board earlier.
-        initial_raw_friendlists = self.get_friends(initial_character_ids)
+        initial_raw_friendlists = self.get_friends(self.initial_character_ids)
 
         friends_to_check = self.unpack_friendlists(initial_raw_friendlists)
 
@@ -276,15 +275,16 @@ class MainDataCrawler:
         world_id = friend["world_id"]
         last_online = int(friend.get("last_login_time", -1))
 
-        self.done.add(character_id)
-        if last_online > self.tSinceLogin:
-            if int(world_id) == int(self.server_id):
-                return "normal"
-            return "cross server"
-        else:
-            if int(world_id) == int(self.server_id):
-                return "old"
+        cross_server = int(world_id) == int(self.server_id)
+        old = last_online > self.tSinceLogin
+
+        if cross_server and old:
             return "both"
+        if cross_server:
+            return "cross server"
+        if old:
+            return "old"
+        return "normal"
 
     def unpack_friendlists(self, raw_friendlists: dict) -> list:
         """
@@ -312,6 +312,8 @@ class MainDataCrawler:
         uncovered_friends = 0
         out_of_scope_friends = 0
 
+        out_of_scope_context = {}
+
 
         for character_id, friend_list in raw_friendlists.items():
             self.done.add(character_id)
@@ -319,20 +321,27 @@ class MainDataCrawler:
                 # It is at this point that "friend" starts to look like a fake word
                 friend_id = friend.get("character_id", -1)
 
-                # If a friends_id is already inside of done we can assume its edge to the current character already
-                # exists and move on
-                if friend_id in self.done:
-                    covered_friends += 1
-                    continue
+                if friend_id in self.initial_character_ids:
+                    # In such a case the id is already in done but we still need to know how old it is
+                    character_info_args.append((character_id, friend.get("last_login_time", 0)))
 
                 status = self.categorize_friends(friend)
 
                 # We only want to query "normal" ie not old and same server friends of friends.
                 if status == "normal":
-                    character_id_queue.add(friend_id)
-                    uncovered_friends += 1
+                    # If a friends_id is already inside of done we can assume its edge to the current character already
+                    # exists and move on
+                    if friend_id in self.done:
+                        covered_friends += 1
+                    else:
+                        character_id_queue.add(friend_id)
+                        uncovered_friends += 1
                 else:
                     out_of_scope_friends += 1
+                    if status not in out_of_scope_context:
+                        out_of_scope_context[status] = 1
+                    else:
+                        out_of_scope_context[status] += 1
                 character_info_args.append((character_id, friend.get("last_login_time", 0)))
                 edge_set_args.append((character_id, friend_id, status))
 
@@ -343,7 +352,7 @@ class MainDataCrawler:
 
         fetch_logger().info(f"Unpacked {len(raw_friendlists)} found {covered_friends} characters we already have in "
                             f"the database. {uncovered_friends} characters we need to query and {out_of_scope_friends} "
-                            f"friends who are forbidden to this crawler")
+                            f"friends who are forbidden to this crawler {out_of_scope_context}")
         fetch_logger().critical(f"Unpacking took {time.time()-tstart}")
         return list(character_id_queue)
 
@@ -444,11 +453,17 @@ class MainDataCrawler:
         """
         nodes = graph.nodes()
 
+        # Find only those characters who are not "OLD"
+        # old_id = single_column(self.database_connection,
+        #                        f"SELECT character_id FROM {self.table_name}_character_info WHERE last_login_date < ?",
+        #                        (self.tSinceLogin,))
+        # remaining_nodes = [n for n in nodes if n not in old_id]
+        remaining_nodes = nodes
         # Gets character attributes for each found in the friend lists
         archive_id = single_column(
-            self.archive_connection, f"SELECT character_id from {self.table_name}_node"
+            self.archive_connection, f"SELECT character_id FROM {self.table_name}_node "
         )
-        remaining_nodes = [n for n in nodes if n not in archive_id]
+        remaining_nodes = [n for n in remaining_nodes if n not in archive_id]
         re_count = len(remaining_nodes)
         fetch_logger().info(
             f"Number of nodes in graph is: {len(nodes)} Number of unarchived nodes is: {re_count}"
@@ -592,7 +607,7 @@ class MainDataCrawler:
             fetch_logger().info(f"Fetching {leaderboard_type} {limit}")
             url = f"http://census.daybreakgames.com/s:{SERVICE_ID}/get/" \
                   f"{self.namespace}/leaderboard/?name={leaderboard_type}" \
-                  f"&period=Weekly&world={self.server_name}&c:limit={limit}"
+                  f"&period=Weekly&world={self.server_id}&c:limit={limit}"
 
             fetch_logger().info(url)
             decoded = fetch_url(url)
@@ -650,30 +665,32 @@ class MainDataCrawler:
             self.archive_connection.execute(f"DROP TABLE IF EXISTS {name}")
 
 
+def setup_cli_options():
+    argument_parser = argparse.ArgumentParser()
+
+    argument_parser.add_argument('--target_initials', type=str, nargs='+', default=["E", "C", "M"])
+    argument_parser.add_argument('--restart', action='store_true', help='Delete existing data and restart')
+    argument_parser.add_argument('--name_overwrite', default=None)
+    return argument_parser
 
 
 def run_PS4():
     # Crawl the playstation 4 servers.
     # Note that most of these servers have since been merged together.
+    argument_parser = setup_cli_options()
+    parser_options = argument_parser.parse_args()
     for initials in ["graph", "Cr", "L", "S", "Ce", "P"]:
-        server_crawler = MainDataCrawler(initials)
+        server_crawler = MainDataCrawler(initials, parser_options.restart, parser_options.name_overwrite)
         fetch_logger().info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
 
 
 def run_PC():
     # Crawl the specified PC servers.
-    argument_parser = argparse.ArgumentParser()
-
-    argument_parser.add_argument('--target_initials', type=str, nargs='+', default=["E", "C", "M"])
-    argument_parser.add_argument('--restart', action='store_true', help='Delete existing data and restart')
-    argument_parser.add_argument('--name_overwrite', default=None)
-
+    argument_parser = setup_cli_options()
     parser_options = argument_parser.parse_args()
-
     for initials in parser_options.target_initials:
         server_crawler = MainDataCrawler(initials, parser_options.restart, parser_options.name_overwrite)
-
         fetch_logger().info(f"Now crawling {server_crawler.server_name}")
         server_crawler.run()
 
@@ -701,7 +718,10 @@ def my_set_thing(graph, attribute_name, a_dict):
     always throws errors if the dict is missing any values in the graph."""
 
     for node_id in graph.nodes():
-        graph.nodes[node_id][attribute_name] = a_dict[node_id]
+        if node_id in a_dict:
+            graph.nodes[node_id][attribute_name] = a_dict[node_id]
+        else:
+            graph.nodes[node_id][attribute_name] = 'unset'
     return graph
 
 
@@ -711,6 +731,7 @@ def save_graph_to_graphml(database_name: str, source_table_name: str) -> None:
 
 
     """
+    setup_logger('DEBUG', source_table_name, 'server_name')
     graphml_attrs = [
         "name",
         "faction",
@@ -732,18 +753,23 @@ def save_graph_to_graphml(database_name: str, source_table_name: str) -> None:
 
     graph = nx.Graph()
     for edge in edge_raw:
-        if edge[2] == "normal":
-            graph.add_edge(edge[0], edge[1])
-            graph[edge[0]][edge[1]]["status"] = edge[2]
+        # if edge[2] == "normal":
+        graph.add_edge(edge[0], edge[1])
+        graph[edge[0]][edge[1]]["status"] = edge[2]
 
     archive_id = single_column(archive_connection, f"Select character_id from {source_table_name}_node")
-    remaining_nodes = [n for n in graph.nodes() if n not in archive_id]
-    fetch_logger().info(remaining_nodes)
-    fetch_logger().info("deleted for being problems")
-    graph.remove_nodes_from(remaining_nodes)
+    nodes_without_data = [n for n in graph.nodes() if n not in archive_id]
+
+    # fetch_logger().info(f"{len(nodes_without_data)} deleted for having no data")
+    # graph.remove_nodes_from(nodes_without_data)
     for attr in graphml_attrs:
+
+        attribute_storage_dict = sql_columns_to_dicts(source_table_name, attr, database_connection)
+
+        fetch_logger().info(f"{attr}: {len(graph.nodes())}")
+
         graph = my_set_thing(
-            graph, attr, sql_columns_to_dicts(source_table_name, attr, database_connection)
+            graph, attr, attribute_storage_dict
         )
 
     graphml_path = os.path.join("C:", f"{source_table_name}test.graphml")
@@ -754,4 +780,4 @@ def save_graph_to_graphml(database_name: str, source_table_name: str) -> None:
 
 if __name__ == "__main__":
     run_PC()
-    # save_graph_to_graphml('Connery.db', 'Connery_February_13_2022')
+    save_graph_to_graphml('Connery.db', 'Connery_February_15_2022')
